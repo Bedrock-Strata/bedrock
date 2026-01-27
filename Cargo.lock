@@ -1641,6 +1641,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zcash-jd-server"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "hex",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zcash-mining-protocol",
+ "zcash-pool-server",
+]
+
+[[package]]
 name = "zcash-mining-protocol"
 version = "0.1.0"
 dependencies = [

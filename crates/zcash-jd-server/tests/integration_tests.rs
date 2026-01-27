@@ -12,7 +12,8 @@ use zcash_jd_server::codec::{
     decode_allocate_token, decode_push_solution, encode_allocate_token, encode_push_solution,
 };
 use zcash_jd_server::{
-    AllocateMiningJobToken, JdServer, JdServerConfig, PushSolution, SetCustomMiningJob,
+    AllocateMiningJobToken, JdServer, JdServerConfig, JobDeclarationMode, PushSolution,
+    SetCustomMiningJob,
 };
 use zcash_pool_common::PayoutTracker;
 
@@ -84,11 +85,13 @@ fn test_message_codec_roundtrips() {
     let msg = AllocateMiningJobToken {
         request_id: 42,
         user_identifier: "test".to_string(),
+        requested_mode: JobDeclarationMode::CoinbaseOnly,
     };
     let encoded = encode_allocate_token(&msg).unwrap();
     let decoded = decode_allocate_token(&encoded).unwrap();
     assert_eq!(decoded.request_id, msg.request_id);
     assert_eq!(decoded.user_identifier, msg.user_identifier);
+    assert_eq!(decoded.requested_mode, msg.requested_mode);
 
     // PushSolution
     let solution_msg = PushSolution {

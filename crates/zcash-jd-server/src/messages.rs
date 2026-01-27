@@ -27,6 +27,43 @@ pub mod message_types {
     pub const PUSH_SOLUTION: u8 = 0x55;
 }
 
+/// Job declaration mode
+///
+/// Determines what level of control the miner has over block construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JobDeclarationMode {
+    /// Miner customizes coinbase only; pool provides tx set
+    #[default]
+    CoinbaseOnly = 0,
+    /// Miner provides full template including transaction selection
+    FullTemplate = 1,
+}
+
+impl JobDeclarationMode {
+    /// Convert to u8
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Try to convert from u8
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::CoinbaseOnly),
+            1 => Some(Self::FullTemplate),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for JobDeclarationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CoinbaseOnly => write!(f, "CoinbaseOnly"),
+            Self::FullTemplate => write!(f, "FullTemplate"),
+        }
+    }
+}
+
 /// Client -> Server: Request a token for job declaration
 ///
 /// The client sends this message to request a token that will be used
@@ -38,14 +75,32 @@ pub struct AllocateMiningJobToken {
     pub request_id: u32,
     /// Human-readable identifier for the mining device (UTF-8)
     pub user_identifier: String,
+    /// Requested job declaration mode
+    pub requested_mode: JobDeclarationMode,
 }
 
 impl AllocateMiningJobToken {
     /// Create a new token allocation request
+    ///
+    /// Defaults to CoinbaseOnly mode for backward compatibility.
     pub fn new(request_id: u32, user_identifier: impl Into<String>) -> Self {
         Self {
             request_id,
             user_identifier: user_identifier.into(),
+            requested_mode: JobDeclarationMode::CoinbaseOnly,
+        }
+    }
+
+    /// Create a new token allocation request with a specific mode
+    pub fn with_mode(
+        request_id: u32,
+        user_identifier: impl Into<String>,
+        requested_mode: JobDeclarationMode,
+    ) -> Self {
+        Self {
+            request_id,
+            user_identifier: user_identifier.into(),
+            requested_mode,
         }
     }
 }
@@ -66,6 +121,8 @@ pub struct AllocateMiningJobTokenSuccess {
     pub coinbase_output_max_additional_size: u32,
     /// Whether async mining (starting before job confirmation) is allowed
     pub async_mining_allowed: bool,
+    /// Granted mode (may differ from requested if pool doesn't support)
+    pub granted_mode: JobDeclarationMode,
 }
 
 /// Client -> Server: Declare a custom mining job
@@ -336,6 +393,16 @@ mod tests {
         let request = AllocateMiningJobToken::new(1, "miner-001");
         assert_eq!(request.request_id, 1);
         assert_eq!(request.user_identifier, "miner-001");
+        assert_eq!(request.requested_mode, JobDeclarationMode::CoinbaseOnly);
+    }
+
+    #[test]
+    fn test_allocate_token_request_with_mode() {
+        let request =
+            AllocateMiningJobToken::with_mode(1, "miner-001", JobDeclarationMode::FullTemplate);
+        assert_eq!(request.request_id, 1);
+        assert_eq!(request.user_identifier, "miner-001");
+        assert_eq!(request.requested_mode, JobDeclarationMode::FullTemplate);
     }
 
     #[test]
@@ -346,11 +413,34 @@ mod tests {
             coinbase_output: vec![0x76, 0xa9, 0x14], // P2PKH prefix
             coinbase_output_max_additional_size: 1000,
             async_mining_allowed: true,
+            granted_mode: JobDeclarationMode::CoinbaseOnly,
         };
 
         assert_eq!(response.coinbase_output_max_additional_size, 1000);
         assert!(response.async_mining_allowed);
         assert!(!response.coinbase_output.is_empty());
+        assert_eq!(response.granted_mode, JobDeclarationMode::CoinbaseOnly);
+    }
+
+    #[test]
+    fn test_job_declaration_mode() {
+        // Test default
+        assert_eq!(JobDeclarationMode::default(), JobDeclarationMode::CoinbaseOnly);
+
+        // Test conversion roundtrip
+        for mode in [JobDeclarationMode::CoinbaseOnly, JobDeclarationMode::FullTemplate] {
+            let byte = mode.as_u8();
+            let recovered = JobDeclarationMode::from_u8(byte).unwrap();
+            assert_eq!(mode, recovered);
+        }
+
+        // Test invalid value
+        assert!(JobDeclarationMode::from_u8(2).is_none());
+        assert!(JobDeclarationMode::from_u8(0xFF).is_none());
+
+        // Test display
+        assert_eq!(format!("{}", JobDeclarationMode::CoinbaseOnly), "CoinbaseOnly");
+        assert_eq!(format!("{}", JobDeclarationMode::FullTemplate), "FullTemplate");
     }
 
     #[test]

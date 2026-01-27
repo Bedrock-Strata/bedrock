@@ -92,6 +92,8 @@ impl JdServer {
             coinbase_output: self.config.pool_payout_script.clone(),
             coinbase_output_max_additional_size: self.config.coinbase_output_max_additional_size,
             async_mining_allowed: self.config.async_mining_allowed,
+            // For now, always grant CoinbaseOnly mode (Full-Template support coming in future phase)
+            granted_mode: crate::messages::JobDeclarationMode::CoinbaseOnly,
         })
     }
 

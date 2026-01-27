@@ -8,8 +8,8 @@
 
 use crate::error::{JdServerError, Result};
 use crate::messages::{
-    message_types, AllocateMiningJobToken, AllocateMiningJobTokenSuccess, PushSolution,
-    SetCustomMiningJob, SetCustomMiningJobError, SetCustomMiningJobErrorCode,
+    message_types, AllocateMiningJobToken, AllocateMiningJobTokenSuccess, JobDeclarationMode,
+    PushSolution, SetCustomMiningJob, SetCustomMiningJobError, SetCustomMiningJobErrorCode,
     SetCustomMiningJobSuccess,
 };
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -87,6 +87,7 @@ pub fn encode_allocate_token(msg: &AllocateMiningJobToken) -> Result<Vec<u8>> {
         .write_u32::<LittleEndian>(msg.request_id)
         .unwrap();
     write_string(&mut payload, &msg.user_identifier);
+    payload.write_u8(msg.requested_mode.as_u8()).unwrap();
 
     let frame = MessageFrame {
         extension_type: JD_EXTENSION_TYPE,
@@ -119,9 +120,16 @@ pub fn decode_allocate_token(data: &[u8]) -> Result<AllocateMiningJobToken> {
         .map_err(|e| JdServerError::Protocol(e.to_string()))?;
     let user_identifier = read_string(&mut cursor)?;
 
+    // Read requested_mode if present, default to CoinbaseOnly for backward compatibility
+    let requested_mode = match cursor.read_u8() {
+        Ok(byte) => JobDeclarationMode::from_u8(byte).unwrap_or(JobDeclarationMode::CoinbaseOnly),
+        Err(_) => JobDeclarationMode::CoinbaseOnly,
+    };
+
     Ok(AllocateMiningJobToken {
         request_id,
         user_identifier,
+        requested_mode,
     })
 }
 
@@ -140,6 +148,7 @@ pub fn encode_allocate_token_success(msg: &AllocateMiningJobTokenSuccess) -> Res
     payload
         .write_u8(if msg.async_mining_allowed { 1 } else { 0 })
         .unwrap();
+    payload.write_u8(msg.granted_mode.as_u8()).unwrap();
 
     let frame = MessageFrame {
         extension_type: JD_EXTENSION_TYPE,
@@ -180,12 +189,19 @@ pub fn decode_allocate_token_success(data: &[u8]) -> Result<AllocateMiningJobTok
         .map_err(|e| JdServerError::Protocol(e.to_string()))?
         != 0;
 
+    // Read granted_mode if present, default to CoinbaseOnly for backward compatibility
+    let granted_mode = match cursor.read_u8() {
+        Ok(byte) => JobDeclarationMode::from_u8(byte).unwrap_or(JobDeclarationMode::CoinbaseOnly),
+        Err(_) => JobDeclarationMode::CoinbaseOnly,
+    };
+
     Ok(AllocateMiningJobTokenSuccess {
         request_id,
         mining_job_token,
         coinbase_output,
         coinbase_output_max_additional_size,
         async_mining_allowed,
+        granted_mode,
     })
 }
 
@@ -464,6 +480,7 @@ mod tests {
         let original = AllocateMiningJobToken {
             request_id: 42,
             user_identifier: "test-miner-001".to_string(),
+            requested_mode: JobDeclarationMode::CoinbaseOnly,
         };
 
         let encoded = encode_allocate_token(&original).unwrap();
@@ -471,6 +488,23 @@ mod tests {
 
         assert_eq!(original.request_id, decoded.request_id);
         assert_eq!(original.user_identifier, decoded.user_identifier);
+        assert_eq!(original.requested_mode, decoded.requested_mode);
+    }
+
+    #[test]
+    fn test_allocate_token_full_template_mode_roundtrip() {
+        let original = AllocateMiningJobToken {
+            request_id: 42,
+            user_identifier: "test-miner-001".to_string(),
+            requested_mode: JobDeclarationMode::FullTemplate,
+        };
+
+        let encoded = encode_allocate_token(&original).unwrap();
+        let decoded = decode_allocate_token(&encoded).unwrap();
+
+        assert_eq!(original.request_id, decoded.request_id);
+        assert_eq!(original.user_identifier, decoded.user_identifier);
+        assert_eq!(original.requested_mode, decoded.requested_mode);
     }
 
     #[test]
@@ -481,6 +515,7 @@ mod tests {
             coinbase_output: vec![0x76, 0xa9, 0x14, 0xde, 0xad, 0xbe, 0xef],
             coinbase_output_max_additional_size: 1000,
             async_mining_allowed: true,
+            granted_mode: JobDeclarationMode::CoinbaseOnly,
         };
 
         let encoded = encode_allocate_token_success(&original).unwrap();
@@ -494,6 +529,32 @@ mod tests {
             decoded.coinbase_output_max_additional_size
         );
         assert_eq!(original.async_mining_allowed, decoded.async_mining_allowed);
+        assert_eq!(original.granted_mode, decoded.granted_mode);
+    }
+
+    #[test]
+    fn test_allocate_token_success_full_template_mode_roundtrip() {
+        let original = AllocateMiningJobTokenSuccess {
+            request_id: 42,
+            mining_job_token: vec![0x01, 0x02, 0x03, 0x04],
+            coinbase_output: vec![0x76, 0xa9, 0x14, 0xde, 0xad, 0xbe, 0xef],
+            coinbase_output_max_additional_size: 1000,
+            async_mining_allowed: true,
+            granted_mode: JobDeclarationMode::FullTemplate,
+        };
+
+        let encoded = encode_allocate_token_success(&original).unwrap();
+        let decoded = decode_allocate_token_success(&encoded).unwrap();
+
+        assert_eq!(original.request_id, decoded.request_id);
+        assert_eq!(original.mining_job_token, decoded.mining_job_token);
+        assert_eq!(original.coinbase_output, decoded.coinbase_output);
+        assert_eq!(
+            original.coinbase_output_max_additional_size,
+            decoded.coinbase_output_max_additional_size
+        );
+        assert_eq!(original.async_mining_allowed, decoded.async_mining_allowed);
+        assert_eq!(original.granted_mode, decoded.granted_mode);
     }
 
     #[test]
@@ -588,10 +649,11 @@ mod tests {
         let token = AllocateMiningJobToken {
             request_id: 1,
             user_identifier: "x".to_string(),
+            requested_mode: JobDeclarationMode::CoinbaseOnly,
         };
         let encoded = encode_allocate_token(&token).unwrap();
 
-        // Should have 6-byte header + 4-byte request_id + 2-byte len + 1-byte string
+        // Should have 6-byte header + 4-byte request_id + 2-byte len + 1-byte string + 1-byte mode
         assert!(encoded.len() >= MessageFrame::HEADER_SIZE);
 
         // First 2 bytes are extension_type (0)

@@ -37,15 +37,15 @@ pub struct AllocateMiningJobToken {
     /// Request identifier for matching response
     pub request_id: u32,
     /// Human-readable identifier for the mining device (UTF-8)
-    pub mining_device_id: String,
+    pub user_identifier: String,
 }
 
 impl AllocateMiningJobToken {
     /// Create a new token allocation request
-    pub fn new(request_id: u32, mining_device_id: impl Into<String>) -> Self {
+    pub fn new(request_id: u32, user_identifier: impl Into<String>) -> Self {
         Self {
             request_id,
-            mining_device_id: mining_device_id.into(),
+            user_identifier: user_identifier.into(),
         }
     }
 }
@@ -60,42 +60,12 @@ pub struct AllocateMiningJobTokenSuccess {
     pub request_id: u32,
     /// Allocated token for job declaration (unique identifier)
     pub mining_job_token: Vec<u8>,
-    /// Minimum required coinbase transaction outputs
-    /// This enforces pool payout addresses in the coinbase
-    pub coinbase_output_constraints: Vec<CoinbaseOutputConstraint>,
+    /// Pool's required coinbase output script (scriptPubKey)
+    pub coinbase_output: Vec<u8>,
     /// Maximum additional size allowed in coinbase (bytes)
     pub coinbase_output_max_additional_size: u32,
-    /// Token validity period (seconds from now)
-    pub token_validity_duration: u32,
-}
-
-impl AllocateMiningJobTokenSuccess {
-    /// Check if the token allows additional coinbase space
-    pub fn allows_additional_outputs(&self) -> bool {
-        self.coinbase_output_max_additional_size > 0
-    }
-}
-
-/// Constraint on coinbase transaction outputs
-///
-/// Pools use these to ensure their payout addresses are included
-/// in any custom coinbase transactions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoinbaseOutputConstraint {
-    /// Output script (scriptPubKey)
-    pub output_script: Vec<u8>,
-    /// Minimum value in zatoshis
-    pub min_value: u64,
-}
-
-impl CoinbaseOutputConstraint {
-    /// Create a new coinbase output constraint
-    pub fn new(output_script: Vec<u8>, min_value: u64) -> Self {
-        Self {
-            output_script,
-            min_value,
-        }
-    }
+    /// Whether async mining (starting before job confirmation) is allowed
+    pub async_mining_allowed: bool,
 }
 
 /// Client -> Server: Declare a custom mining job
@@ -104,6 +74,8 @@ impl CoinbaseOutputConstraint {
 /// mining job with their own coinbase transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetCustomMiningJob {
+    /// Channel ID for this job declaration
+    pub channel_id: u32,
     /// Request identifier for matching response
     pub request_id: u32,
     /// Token from AllocateMiningJobTokenSuccess
@@ -154,21 +126,21 @@ impl SetCustomMiningJob {
 /// Server -> Client: Custom job accepted
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetCustomMiningJobSuccess {
+    /// Channel ID for this job
+    pub channel_id: u32,
     /// Request identifier matching the request
     pub request_id: u32,
     /// Server-assigned job identifier
     pub job_id: u32,
-    /// If true, discard all previous jobs for this channel
-    pub clean_jobs: bool,
 }
 
 impl SetCustomMiningJobSuccess {
     /// Create a new success response
-    pub fn new(request_id: u32, job_id: u32, clean_jobs: bool) -> Self {
+    pub fn new(channel_id: u32, request_id: u32, job_id: u32) -> Self {
         Self {
+            channel_id,
             request_id,
             job_id,
-            clean_jobs,
         }
     }
 }
@@ -176,6 +148,8 @@ impl SetCustomMiningJobSuccess {
 /// Server -> Client: Custom job rejected
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetCustomMiningJobError {
+    /// Channel ID for this job
+    pub channel_id: u32,
     /// Request identifier matching the request
     pub request_id: u32,
     /// Error code indicating the reason for rejection
@@ -187,11 +161,13 @@ pub struct SetCustomMiningJobError {
 impl SetCustomMiningJobError {
     /// Create a new error response
     pub fn new(
+        channel_id: u32,
         request_id: u32,
         error_code: SetCustomMiningJobErrorCode,
         message: impl Into<String>,
     ) -> Self {
         Self {
+            channel_id,
             request_id,
             error_code,
             error_message: message.into(),
@@ -199,8 +175,9 @@ impl SetCustomMiningJobError {
     }
 
     /// Create error for invalid token
-    pub fn invalid_token(request_id: u32) -> Self {
+    pub fn invalid_token(channel_id: u32, request_id: u32) -> Self {
         Self::new(
+            channel_id,
             request_id,
             SetCustomMiningJobErrorCode::InvalidToken,
             "Invalid or unknown mining job token",
@@ -208,8 +185,9 @@ impl SetCustomMiningJobError {
     }
 
     /// Create error for expired token
-    pub fn token_expired(request_id: u32) -> Self {
+    pub fn token_expired(channel_id: u32, request_id: u32) -> Self {
         Self::new(
+            channel_id,
             request_id,
             SetCustomMiningJobErrorCode::TokenExpired,
             "Mining job token has expired",
@@ -217,8 +195,9 @@ impl SetCustomMiningJobError {
     }
 
     /// Create error for invalid coinbase
-    pub fn invalid_coinbase(request_id: u32, reason: impl Into<String>) -> Self {
+    pub fn invalid_coinbase(channel_id: u32, request_id: u32, reason: impl Into<String>) -> Self {
         Self::new(
+            channel_id,
             request_id,
             SetCustomMiningJobErrorCode::InvalidCoinbase,
             reason,
@@ -238,8 +217,8 @@ pub enum SetCustomMiningJobErrorCode {
     InvalidCoinbase = 0x03,
     /// Coinbase doesn't meet output constraints
     CoinbaseConstraintViolation = 0x04,
-    /// Previous block hash doesn't match current chain tip
-    InvalidPrevHash = 0x05,
+    /// Previous block hash is stale (doesn't match current chain tip)
+    StalePrevHash = 0x05,
     /// Merkle root is invalid
     InvalidMerkleRoot = 0x06,
     /// Block version is not supported
@@ -265,7 +244,7 @@ impl SetCustomMiningJobErrorCode {
             0x02 => Some(Self::TokenExpired),
             0x03 => Some(Self::InvalidCoinbase),
             0x04 => Some(Self::CoinbaseConstraintViolation),
-            0x05 => Some(Self::InvalidPrevHash),
+            0x05 => Some(Self::StalePrevHash),
             0x06 => Some(Self::InvalidMerkleRoot),
             0x07 => Some(Self::InvalidVersion),
             0x08 => Some(Self::InvalidBits),
@@ -283,7 +262,7 @@ impl std::fmt::Display for SetCustomMiningJobErrorCode {
             Self::TokenExpired => write!(f, "token expired"),
             Self::InvalidCoinbase => write!(f, "invalid coinbase"),
             Self::CoinbaseConstraintViolation => write!(f, "coinbase constraint violation"),
-            Self::InvalidPrevHash => write!(f, "invalid previous hash"),
+            Self::StalePrevHash => write!(f, "stale previous hash"),
             Self::InvalidMerkleRoot => write!(f, "invalid merkle root"),
             Self::InvalidVersion => write!(f, "invalid version"),
             Self::InvalidBits => write!(f, "invalid bits"),
@@ -303,10 +282,12 @@ pub struct PushSolution {
     pub channel_id: u32,
     /// Job ID from SetCustomMiningJobSuccess
     pub job_id: u32,
-    /// Full 32-byte nonce
-    pub nonce: [u8; 32],
+    /// Block version
+    pub version: u32,
     /// Block timestamp (may differ from job time)
     pub time: u32,
+    /// Full 32-byte nonce
+    pub nonce: [u8; 32],
     /// Equihash (200,9) solution (1344 bytes)
     pub solution: [u8; 1344],
 }
@@ -319,15 +300,17 @@ impl PushSolution {
     pub fn new(
         channel_id: u32,
         job_id: u32,
-        nonce: [u8; 32],
+        version: u32,
         time: u32,
+        nonce: [u8; 32],
         solution: [u8; 1344],
     ) -> Self {
         Self {
             channel_id,
             job_id,
-            nonce,
+            version,
             time,
+            nonce,
             solution,
         }
     }
@@ -338,58 +321,11 @@ impl PushSolution {
     }
 }
 
-/// Server -> Client: Solution accepted/rejected
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PushSolutionResponse {
-    /// Channel ID
-    pub channel_id: u32,
-    /// Job ID
-    pub job_id: u32,
-    /// Result of solution validation
-    pub result: SolutionResult,
-}
-
-/// Result of solution validation
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SolutionResult {
-    /// Solution accepted and block submitted to network
-    Accepted {
-        /// Block hash if successfully mined
-        block_hash: Option<[u8; 32]>,
-    },
-    /// Solution rejected with reason
-    Rejected(SolutionRejectReason),
-}
-
-/// Reasons for solution rejection
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SolutionRejectReason {
-    /// Job ID not found or expired
-    StaleJob,
-    /// Duplicate solution already submitted
-    Duplicate,
-    /// Solution does not verify (invalid Equihash)
-    InvalidSolution,
-    /// Block doesn't meet network difficulty
-    LowDifficulty,
-    /// Nonce is invalid
-    InvalidNonce,
-    /// Other error
-    Other(String),
-}
-
-impl std::fmt::Display for SolutionRejectReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::StaleJob => write!(f, "stale job"),
-            Self::Duplicate => write!(f, "duplicate solution"),
-            Self::InvalidSolution => write!(f, "invalid solution"),
-            Self::LowDifficulty => write!(f, "low difficulty"),
-            Self::InvalidNonce => write!(f, "invalid nonce"),
-            Self::Other(msg) => write!(f, "other: {}", msg),
-        }
-    }
-}
+// NOTE: The following types are not in the JD protocol spec and have been removed:
+// - PushSolutionResponse
+// - SolutionResult
+// - SolutionRejectReason
+// PushSolution is a one-way message; the server does not respond to it per spec.
 
 #[cfg(test)]
 mod tests {
@@ -399,7 +335,7 @@ mod tests {
     fn test_allocate_token_request() {
         let request = AllocateMiningJobToken::new(1, "miner-001");
         assert_eq!(request.request_id, 1);
-        assert_eq!(request.mining_device_id, "miner-001");
+        assert_eq!(request.user_identifier, "miner-001");
     }
 
     #[test]
@@ -407,21 +343,20 @@ mod tests {
         let response = AllocateMiningJobTokenSuccess {
             request_id: 1,
             mining_job_token: vec![0x01, 0x02, 0x03],
-            coinbase_output_constraints: vec![
-                CoinbaseOutputConstraint::new(vec![0x76, 0xa9], 100_000_000),
-            ],
+            coinbase_output: vec![0x76, 0xa9, 0x14], // P2PKH prefix
             coinbase_output_max_additional_size: 1000,
-            token_validity_duration: 3600,
+            async_mining_allowed: true,
         };
 
-        assert!(response.allows_additional_outputs());
-        assert_eq!(response.coinbase_output_constraints.len(), 1);
-        assert_eq!(response.coinbase_output_constraints[0].min_value, 100_000_000);
+        assert_eq!(response.coinbase_output_max_additional_size, 1000);
+        assert!(response.async_mining_allowed);
+        assert!(!response.coinbase_output.is_empty());
     }
 
     #[test]
     fn test_set_custom_mining_job_validation() {
         let job = SetCustomMiningJob {
+            channel_id: 1,
             request_id: 1,
             mining_job_token: vec![0x01, 0x02, 0x03],
             version: 5,
@@ -459,6 +394,7 @@ mod tests {
     #[test]
     fn test_build_header() {
         let job = SetCustomMiningJob {
+            channel_id: 1,
             request_id: 1,
             mining_job_token: vec![0x01],
             version: 5,
@@ -498,7 +434,7 @@ mod tests {
             SetCustomMiningJobErrorCode::TokenExpired,
             SetCustomMiningJobErrorCode::InvalidCoinbase,
             SetCustomMiningJobErrorCode::CoinbaseConstraintViolation,
-            SetCustomMiningJobErrorCode::InvalidPrevHash,
+            SetCustomMiningJobErrorCode::StalePrevHash,
             SetCustomMiningJobErrorCode::InvalidMerkleRoot,
             SetCustomMiningJobErrorCode::InvalidVersion,
             SetCustomMiningJobErrorCode::InvalidBits,
@@ -517,15 +453,18 @@ mod tests {
 
     #[test]
     fn test_error_helpers() {
-        let error = SetCustomMiningJobError::invalid_token(42);
+        let error = SetCustomMiningJobError::invalid_token(1, 42);
+        assert_eq!(error.channel_id, 1);
         assert_eq!(error.request_id, 42);
         assert_eq!(error.error_code, SetCustomMiningJobErrorCode::InvalidToken);
 
-        let error = SetCustomMiningJobError::token_expired(43);
+        let error = SetCustomMiningJobError::token_expired(2, 43);
+        assert_eq!(error.channel_id, 2);
         assert_eq!(error.request_id, 43);
         assert_eq!(error.error_code, SetCustomMiningJobErrorCode::TokenExpired);
 
-        let error = SetCustomMiningJobError::invalid_coinbase(44, "missing pool output");
+        let error = SetCustomMiningJobError::invalid_coinbase(3, 44, "missing pool output");
+        assert_eq!(error.channel_id, 3);
         assert_eq!(error.request_id, 44);
         assert_eq!(error.error_code, SetCustomMiningJobErrorCode::InvalidCoinbase);
         assert_eq!(error.error_message, "missing pool output");
@@ -534,37 +473,18 @@ mod tests {
     #[test]
     fn test_push_solution() {
         let solution = PushSolution::new(
-            1,      // channel_id
-            100,    // job_id
-            [0x11; 32], // nonce
+            1,          // channel_id
+            100,        // job_id
+            5,          // version
             1700000000, // time
+            [0x11; 32], // nonce
             [0x22; 1344], // solution
         );
 
         assert_eq!(solution.channel_id, 1);
         assert_eq!(solution.job_id, 100);
+        assert_eq!(solution.version, 5);
         assert!(solution.validate_solution_len());
-    }
-
-    #[test]
-    fn test_solution_result() {
-        let accepted = SolutionResult::Accepted {
-            block_hash: Some([0xaa; 32]),
-        };
-        match accepted {
-            SolutionResult::Accepted { block_hash } => {
-                assert!(block_hash.is_some());
-            }
-            _ => panic!("Expected Accepted"),
-        }
-
-        let rejected = SolutionResult::Rejected(SolutionRejectReason::StaleJob);
-        match rejected {
-            SolutionResult::Rejected(reason) => {
-                assert_eq!(reason.to_string(), "stale job");
-            }
-            _ => panic!("Expected Rejected"),
-        }
     }
 
     #[test]

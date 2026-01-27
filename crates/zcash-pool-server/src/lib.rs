@@ -8,14 +8,16 @@
 
 pub mod config;
 pub mod error;
-pub mod server;
-pub mod session;
-pub mod channel;
-pub mod job;
-pub mod share;
-pub mod duplicate;
-pub mod payout;
+
+// TODO: These modules will be implemented in subsequent tasks
+// pub mod server;
+// pub mod session;
+// pub mod channel;
+// pub mod job;
+// pub mod share;
+// pub mod duplicate;
+// pub mod payout;
 
 pub use config::PoolConfig;
 pub use error::PoolError;
-pub use server::PoolServer;
+// pub use server::PoolServer;

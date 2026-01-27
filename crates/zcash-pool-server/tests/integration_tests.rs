@@ -68,6 +68,7 @@ fn test_config_custom() {
         max_connections: 5000,
         jd_listen_addr: Some("0.0.0.0:3334".parse().unwrap()),
         pool_payout_script: Some(vec![0x76, 0xa9, 0x14]),
+        ..Default::default()
     };
 
     assert_eq!(config.listen_addr.port(), 4444);
@@ -75,6 +76,9 @@ fn test_config_custom() {
     assert_eq!(config.initial_difficulty, 100.0);
     assert!(config.jd_listen_addr.is_some());
     assert!(config.pool_payout_script.is_some());
+    // Verify noise defaults
+    assert!(!config.noise_enabled);
+    assert!(config.noise_private_key_path.is_none());
 }
 
 // =============================================================================

@@ -39,6 +39,9 @@ pub enum PoolError {
     #[error("Template provider error: {0}")]
     TemplateProvider(String),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
     #[error("Server shutdown")]
     Shutdown,
 }

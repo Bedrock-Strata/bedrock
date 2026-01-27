@@ -1,6 +1,7 @@
 //! Pool server configuration
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 /// Pool server configuration
 #[derive(Debug, Clone)]
@@ -34,6 +35,24 @@ pub struct PoolConfig {
 
     /// Pool's payout script for coinbase (used by JD Server)
     pub pool_payout_script: Option<Vec<u8>>,
+
+    /// Enable Noise encryption for miner connections
+    pub noise_enabled: bool,
+
+    /// Path to server private key file (hex-encoded)
+    pub noise_private_key_path: Option<PathBuf>,
+
+    /// Enable Noise for JD connections
+    pub jd_noise_enabled: bool,
+
+    /// Metrics server address
+    pub metrics_addr: Option<SocketAddr>,
+
+    /// Use JSON logging format
+    pub json_logging: bool,
+
+    /// OTLP endpoint for distributed tracing
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Default for PoolConfig {
@@ -49,6 +68,12 @@ impl Default for PoolConfig {
             max_connections: 10000,
             jd_listen_addr: None, // Disabled by default
             pool_payout_script: None,
+            noise_enabled: false,
+            noise_private_key_path: None,
+            jd_noise_enabled: false,
+            metrics_addr: Some("127.0.0.1:9090".parse().unwrap()),
+            json_logging: false,
+            otlp_endpoint: None,
         }
     }
 }

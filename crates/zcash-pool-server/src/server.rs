@@ -30,6 +30,8 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use zcash_equihash_validator::VardiffConfig;
 use zcash_jd_server::{handle_jd_client, JdServer, JdServerConfig};
+use zcash_stratum_noise::{Keypair, NoiseResponder};
+use zcash_stratum_observability::{init_logging, start_metrics_server, LogFormat, PoolMetrics};
 use zcash_template_provider::types::BlockTemplate;
 use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
 
@@ -61,11 +63,26 @@ pub struct PoolServer {
     jd_server: Arc<JdServer>,
     /// JD Server listen address (None = disabled)
     jd_listen_addr: Option<SocketAddr>,
+    /// Noise responder for encrypted connections (None = disabled)
+    noise_responder: Option<Arc<NoiseResponder>>,
+    /// Pool metrics
+    metrics: Arc<PoolMetrics>,
 }
 
 impl PoolServer {
     /// Create a new pool server
     pub fn new(config: PoolConfig) -> Result<Self> {
+        // Initialize logging based on config
+        let log_format = if config.json_logging {
+            LogFormat::Json
+        } else {
+            LogFormat::Pretty
+        };
+        init_logging(log_format, "info");
+
+        // Create metrics
+        let metrics = Arc::new(PoolMetrics::new());
+
         // Create template provider
         let tp_config = TemplateProviderConfig {
             zebra_url: config.zebra_url.clone(),
@@ -89,6 +106,29 @@ impl PoolServer {
 
         let jd_listen_addr = config.jd_listen_addr;
 
+        // Create Noise responder if enabled
+        let noise_responder = if config.noise_enabled {
+            let keypair = if let Some(ref key_path) = config.noise_private_key_path {
+                // Load keypair from file
+                let key_hex = std::fs::read_to_string(key_path)
+                    .map_err(|e| PoolError::Config(format!("Failed to read noise key file: {}", e)))?;
+                Keypair::from_private_hex(key_hex.trim())
+                    .map_err(|e| PoolError::Config(format!("Invalid noise private key: {}", e)))?
+            } else {
+                // Generate a new keypair
+                let kp = Keypair::generate();
+                info!(
+                    "Generated new Noise keypair. Public key: {}",
+                    kp.public.to_hex()
+                );
+                info!("To persist this key, save the private key to a file and set noise_private_key_path");
+                kp
+            };
+            Some(Arc::new(NoiseResponder::new(keypair)))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             template_provider: Arc::new(template_provider),
@@ -103,11 +143,21 @@ impl PoolServer {
             current_block_target: Arc::new(RwLock::new([0xff; 32])),
             jd_server,
             jd_listen_addr,
+            noise_responder,
+            metrics,
         })
     }
 
     /// Run the pool server
     pub async fn run(mut self) -> Result<()> {
+        // Start metrics server if configured
+        if let Some(metrics_addr) = self.config.metrics_addr {
+            let metrics = Arc::clone(&self.metrics);
+            tokio::spawn(async move {
+                start_metrics_server(metrics_addr, metrics).await;
+            });
+        }
+
         // Bind to listen address
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!("Pool server listening on {}", self.config.listen_addr);
@@ -136,6 +186,7 @@ impl PoolServer {
         // Spawn periodic stats logging
         let payout_tracker = Arc::clone(&self.payout_tracker);
         let sessions = Arc::clone(&self.sessions);
+        let metrics = Arc::clone(&self.metrics);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -143,6 +194,10 @@ impl PoolServer {
                 let session_count = sessions.read().await.len();
                 let active_miners = payout_tracker.active_miner_count();
                 let hashrate = payout_tracker.estimate_pool_hashrate();
+
+                // Update metrics
+                metrics.set_hashrate(hashrate);
+
                 info!(
                     "Pool stats: {} connections, {} active miners, {:.2} H/s",
                     session_count, active_miners, hashrate
@@ -166,8 +221,38 @@ impl PoolServer {
                                 continue;
                             }
 
-                            if let Err(e) = self.handle_new_connection(stream).await {
-                                error!("Error handling new connection: {}", e);
+                            // Track connection in metrics
+                            self.metrics.record_connection();
+
+                            // Handle Noise handshake if enabled
+                            if let Some(ref responder) = self.noise_responder {
+                                self.metrics.record_noise_handshake();
+                                let responder = Arc::clone(responder);
+                                let metrics = Arc::clone(&self.metrics);
+
+                                tokio::spawn(async move {
+                                    match responder.accept(stream).await {
+                                        Ok(_noise_stream) => {
+                                            // TODO: Use noise_stream instead of raw stream
+                                            // For now, we just log success; actual encrypted transport
+                                            // requires changes to Session to use NoiseStream
+                                            info!("Noise handshake successful for {}", addr);
+                                            // Note: Full integration would require Session to work with NoiseStream
+                                            // This is a placeholder showing the handshake works
+                                        }
+                                        Err(e) => {
+                                            metrics.record_noise_handshake_failed();
+                                            metrics.record_disconnection();
+                                            warn!("Noise handshake failed for {}: {}", addr, e);
+                                        }
+                                    }
+                                });
+                            } else {
+                                // No Noise - handle connection directly
+                                if let Err(e) = self.handle_new_connection(stream).await {
+                                    self.metrics.record_disconnection();
+                                    error!("Error handling new connection: {}", e);
+                                }
                             }
                         }
                         Err(e) => {
@@ -187,12 +272,15 @@ impl PoolServer {
                 } => {
                     if let Ok((stream, addr)) = jd_accept_result {
                         info!("New JD client from {}", addr);
+                        self.metrics.record_jd_connection();
                         let jd_server = Arc::clone(&self.jd_server);
+                        let metrics = Arc::clone(&self.metrics);
                         let client_id = format!("jd_{}", addr);
                         tokio::spawn(async move {
                             if let Err(e) = handle_jd_client(stream, jd_server, client_id).await {
                                 warn!("JD client error: {}", e);
                             }
+                            metrics.record_jd_disconnection();
                         });
                     }
                 }
@@ -282,12 +370,14 @@ impl PoolServer {
 
         // Spawn session task
         let sessions = Arc::clone(&self.sessions);
+        let metrics = Arc::clone(&self.metrics);
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
                 debug!("Session {} ended: {}", channel_id, e);
             }
             // Clean up session on exit
             sessions.write().await.remove(&channel_id);
+            metrics.record_disconnection();
         });
 
         info!("Session {} started", channel_id);

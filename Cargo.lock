@@ -2634,6 +2634,8 @@ dependencies = [
  "zcash-jd-server",
  "zcash-mining-protocol",
  "zcash-pool-common",
+ "zcash-stratum-noise",
+ "zcash-stratum-observability",
  "zcash-template-provider",
 ]
 

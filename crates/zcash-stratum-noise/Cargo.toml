@@ -12,6 +12,7 @@ tracing.workspace = true
 rand = "0.8"
 hex.workspace = true
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+tokio = { workspace = true, features = ["net", "io-util"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

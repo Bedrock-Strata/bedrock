@@ -24,6 +24,7 @@ pub mod error;
 pub mod messages;
 pub mod server;
 pub mod token;
+pub mod validation;
 
 pub use codec::{
     decode_allocate_token, decode_allocate_token_success, decode_get_missing_transactions,
@@ -40,3 +41,4 @@ pub use error::{JdServerError, Result};
 pub use messages::*;
 pub use server::{handle_jd_client, JdServer};
 pub use token::{DeclaredJobInfo, MiningJobToken, TokenManager};
+pub use validation::{ValidationLevel, ValidationResult};

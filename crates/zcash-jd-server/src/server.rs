@@ -446,6 +446,9 @@ mod tests {
             async_mining_allowed: true,
             max_tokens_per_client: 10,
             noise_enabled: false,
+            full_template_enabled: false,
+            full_template_validation: crate::validation::ValidationLevel::Standard,
+            min_pool_payout: 0,
         }
     }
 

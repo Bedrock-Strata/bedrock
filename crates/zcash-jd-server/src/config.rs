@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::validation::ValidationLevel;
+
 /// JD Server configuration
 #[derive(Debug, Clone)]
 pub struct JdServerConfig {
@@ -22,6 +24,15 @@ pub struct JdServerConfig {
 
     /// Enable Noise encryption for JD client connections
     pub noise_enabled: bool,
+
+    /// Enable Full-Template mode (in addition to Coinbase-Only)
+    pub full_template_enabled: bool,
+
+    /// Validation level for full templates
+    pub full_template_validation: ValidationLevel,
+
+    /// Minimum pool payout value (zatoshis) for full templates
+    pub min_pool_payout: u64,
 }
 
 impl Default for JdServerConfig {
@@ -33,6 +44,9 @@ impl Default for JdServerConfig {
             async_mining_allowed: true,
             max_tokens_per_client: 10,
             noise_enabled: false,
+            full_template_enabled: false,
+            full_template_validation: ValidationLevel::Standard,
+            min_pool_payout: 0,
         }
     }
 }

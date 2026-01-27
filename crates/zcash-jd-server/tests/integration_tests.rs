@@ -13,7 +13,7 @@ use zcash_jd_server::codec::{
 };
 use zcash_jd_server::{
     AllocateMiningJobToken, JdServer, JdServerConfig, JobDeclarationMode, PushSolution,
-    SetCustomMiningJob,
+    SetCustomMiningJob, ValidationLevel,
 };
 use zcash_pool_common::PayoutTracker;
 
@@ -26,6 +26,9 @@ fn test_config() -> JdServerConfig {
         async_mining_allowed: true,
         max_tokens_per_client: 10,
         noise_enabled: false,
+        full_template_enabled: false,
+        full_template_validation: ValidationLevel::Standard,
+        min_pool_payout: 0,
     }
 }
 

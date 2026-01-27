@@ -1629,6 +1629,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zcash-mining-protocol",
  "zcash-template-provider",
 ]

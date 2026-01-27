@@ -2,6 +2,7 @@
 
 use crate::config::JdServerConfig;
 use crate::error::{JdServerError, Result};
+use crate::messages::JobDeclarationMode;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -18,6 +19,8 @@ pub struct MiningJobToken {
     pub lifetime: Duration,
     /// Client identifier
     pub client_id: String,
+    /// Granted job declaration mode for this token
+    pub granted_mode: JobDeclarationMode,
     /// Associated job info (set when job declared)
     pub job_info: Option<DeclaredJobInfo>,
 }
@@ -61,8 +64,17 @@ impl TokenManager {
         }
     }
 
-    /// Allocate a new token for a client
+    /// Allocate a new token for a client with CoinbaseOnly mode (default)
     pub fn allocate_token(&self, client_id: &str) -> Result<MiningJobToken> {
+        self.allocate_token_with_mode(client_id, JobDeclarationMode::CoinbaseOnly)
+    }
+
+    /// Allocate a new token for a client with a specific mode
+    pub fn allocate_token_with_mode(
+        &self,
+        client_id: &str,
+        granted_mode: JobDeclarationMode,
+    ) -> Result<MiningJobToken> {
         let counter = self.token_counter.fetch_add(1, Ordering::SeqCst);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -79,6 +91,7 @@ impl TokenManager {
             issued_at: Instant::now(),
             lifetime: self.config.token_lifetime,
             client_id: client_id.to_string(),
+            granted_mode,
             job_info: None,
         };
 
@@ -163,6 +176,28 @@ mod tests {
         assert!(!token.is_expired());
         assert_eq!(token.client_id, "miner-01");
         assert_eq!(token.token.len(), 16);
+        // Default allocation should be CoinbaseOnly mode
+        assert_eq!(token.granted_mode, JobDeclarationMode::CoinbaseOnly);
+    }
+
+    #[test]
+    fn test_token_allocation_with_mode() {
+        let config = JdServerConfig::default();
+        let manager = TokenManager::new(config);
+
+        // Test allocating with FullTemplate mode
+        let token = manager
+            .allocate_token_with_mode("miner-01", JobDeclarationMode::FullTemplate)
+            .unwrap();
+        assert!(!token.is_expired());
+        assert_eq!(token.client_id, "miner-01");
+        assert_eq!(token.granted_mode, JobDeclarationMode::FullTemplate);
+
+        // Test allocating with CoinbaseOnly mode
+        let token2 = manager
+            .allocate_token_with_mode("miner-02", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
+        assert_eq!(token2.granted_mode, JobDeclarationMode::CoinbaseOnly);
     }
 
     #[test]
@@ -173,6 +208,19 @@ mod tests {
         let token = manager.allocate_token("miner-01").unwrap();
         let validated = manager.validate_token(&token.token).unwrap();
         assert_eq!(validated.client_id, "miner-01");
+        assert_eq!(validated.granted_mode, JobDeclarationMode::CoinbaseOnly);
+    }
+
+    #[test]
+    fn test_token_validation_preserves_mode() {
+        let config = JdServerConfig::default();
+        let manager = TokenManager::new(config);
+
+        let token = manager
+            .allocate_token_with_mode("miner-01", JobDeclarationMode::FullTemplate)
+            .unwrap();
+        let validated = manager.validate_token(&token.token).unwrap();
+        assert_eq!(validated.granted_mode, JobDeclarationMode::FullTemplate);
     }
 
     #[test]

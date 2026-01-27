@@ -1,55 +1,71 @@
 //! Job Declaration Server implementation
 //!
 //! This module implements the JD server logic for handling miner connections,
-//! token allocation, job declaration, and solution submission in Coinbase-Only mode.
+//! token allocation, job declaration, and solution submission in Coinbase-Only
+//! and Full-Template modes.
 
 use crate::codec::{
     decode_allocate_token, decode_push_solution, decode_set_custom_job,
-    encode_allocate_token_success, encode_set_custom_job_error, encode_set_custom_job_success,
+    decode_set_full_template_job, encode_allocate_token_success,
+    encode_get_missing_transactions, encode_set_custom_job_error, encode_set_custom_job_success,
+    encode_set_full_template_job_error, encode_set_full_template_job_success,
 };
 use crate::config::JdServerConfig;
 use crate::error::{JdServerError, Result};
 use crate::messages::{
-    message_types, AllocateMiningJobTokenSuccess, PushSolution, SetCustomMiningJob,
-    SetCustomMiningJobError, SetCustomMiningJobErrorCode, SetCustomMiningJobSuccess,
+    message_types, AllocateMiningJobTokenSuccess, GetMissingTransactions, JobDeclarationMode,
+    PushSolution, SetCustomMiningJob, SetCustomMiningJobError, SetCustomMiningJobErrorCode,
+    SetCustomMiningJobSuccess, SetFullTemplateJob, SetFullTemplateJobError,
+    SetFullTemplateJobErrorCode, SetFullTemplateJobSuccess,
 };
 use crate::token::{DeclaredJobInfo, TokenManager};
+use crate::validation::{TemplateValidator, ValidationResult};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, error, info, warn};
 use zcash_mining_protocol::codec::MessageFrame;
 use zcash_pool_common::PayoutTracker;
 
 /// JD Server embedded in pool
 ///
-/// Handles the Job Declaration protocol for Coinbase-Only mode mining.
+/// Handles the Job Declaration protocol for Coinbase-Only and Full-Template mode mining.
 /// This server validates tokens, processes job declarations, and tracks
-/// block solutions for miners who want to create their own coinbase transactions.
+/// block solutions for miners who want to create their own coinbase transactions
+/// or provide full block templates.
 pub struct JdServer {
     /// Configuration
     config: JdServerConfig,
     /// Token manager
     token_manager: Arc<TokenManager>,
+    /// Template validator for Full-Template mode
+    validator: Arc<TokioRwLock<TemplateValidator>>,
     /// Job ID counter
     next_job_id: AtomicU32,
     /// Payout tracker (shared with pool)
     payout_tracker: Arc<PayoutTracker>,
     /// Current prev_hash (for stale detection)
-    current_prev_hash: Arc<tokio::sync::RwLock<Option<[u8; 32]>>>,
+    current_prev_hash: Arc<TokioRwLock<Option<[u8; 32]>>>,
 }
 
 impl JdServer {
     /// Create a new JD Server
     pub fn new(config: JdServerConfig, payout_tracker: Arc<PayoutTracker>) -> Self {
         let token_manager = Arc::new(TokenManager::new(config.clone()));
+        let validator = TemplateValidator::new(
+            config.full_template_validation,
+            config.pool_payout_script.clone(),
+            config.min_pool_payout,
+        );
         Self {
             config,
             token_manager,
+            validator: Arc::new(TokioRwLock::new(validator)),
             next_job_id: AtomicU32::new(1),
             payout_tracker,
-            current_prev_hash: Arc::new(tokio::sync::RwLock::new(None)),
+            current_prev_hash: Arc::new(TokioRwLock::new(None)),
         }
     }
 
@@ -72,17 +88,41 @@ impl JdServer {
     /// Handle a token allocation request
     ///
     /// Allocates a new mining job token for the given user.
+    /// The granted mode is determined based on what the client requested and
+    /// what the server supports.
     pub fn handle_allocate_token(
         &self,
         request_id: u32,
         user_id: &str,
+        requested_mode: JobDeclarationMode,
     ) -> Result<AllocateMiningJobTokenSuccess> {
-        let token = self.token_manager.allocate_token(user_id)?;
+        // Determine granted mode based on request and server configuration
+        let granted_mode = if requested_mode == JobDeclarationMode::FullTemplate {
+            if self.config.full_template_enabled {
+                JobDeclarationMode::FullTemplate
+            } else {
+                // Fall back to CoinbaseOnly if Full-Template not enabled
+                info!(
+                    request_id,
+                    user_id,
+                    "Full-Template mode requested but not enabled, falling back to CoinbaseOnly"
+                );
+                JobDeclarationMode::CoinbaseOnly
+            }
+        } else {
+            JobDeclarationMode::CoinbaseOnly
+        };
+
+        let token = self
+            .token_manager
+            .allocate_token_with_mode(user_id, granted_mode)?;
 
         info!(
             request_id,
             user_id,
             token_len = token.token.len(),
+            requested_mode = %requested_mode,
+            granted_mode = %granted_mode,
             "Allocated mining job token"
         );
 
@@ -92,8 +132,7 @@ impl JdServer {
             coinbase_output: self.config.pool_payout_script.clone(),
             coinbase_output_max_additional_size: self.config.coinbase_output_max_additional_size,
             async_mining_allowed: self.config.async_mining_allowed,
-            // For now, always grant CoinbaseOnly mode (Full-Template support coming in future phase)
-            granted_mode: crate::messages::JobDeclarationMode::CoinbaseOnly,
+            granted_mode,
         })
     }
 
@@ -268,6 +307,198 @@ impl JdServer {
         Ok(())
     }
 
+    /// Handle a full template job declaration (Full-Template mode)
+    ///
+    /// Validates the token, checks mode, validates the template,
+    /// allocates a job ID, and stores job info.
+    pub async fn handle_set_full_template_job(
+        &self,
+        request: SetFullTemplateJob,
+    ) -> std::result::Result<
+        SetFullTemplateJobSuccess,
+        FullTemplateJobResponse,
+    > {
+        // 1. Validate basic structure
+        if let Err(e) = request.validate() {
+            return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                request.channel_id,
+                request.request_id,
+                e,
+                format!("Validation failed: {}", e),
+            )));
+        }
+
+        // 2. Validate token and check mode
+        let token_info = match self.token_manager.validate_token(&request.mining_job_token) {
+            Ok(info) => info,
+            Err(JdServerError::InvalidToken) => {
+                warn!(
+                    request_id = request.request_id,
+                    "Full template job rejected: invalid token"
+                );
+                return Err(FullTemplateJobResponse::Error(
+                    SetFullTemplateJobError::invalid_token(request.channel_id, request.request_id),
+                ));
+            }
+            Err(JdServerError::TokenExpired) => {
+                warn!(
+                    request_id = request.request_id,
+                    "Full template job rejected: token expired"
+                );
+                return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                    request.channel_id,
+                    request.request_id,
+                    SetFullTemplateJobErrorCode::TokenExpired,
+                    "Mining job token has expired",
+                )));
+            }
+            Err(e) => {
+                error!(
+                    request_id = request.request_id,
+                    error = %e,
+                    "Unexpected error validating token"
+                );
+                return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                    request.channel_id,
+                    request.request_id,
+                    SetFullTemplateJobErrorCode::Other,
+                    format!("Token validation error: {}", e),
+                )));
+            }
+        };
+
+        // 3. Verify mode matches (token must be granted FullTemplate mode)
+        if token_info.granted_mode != JobDeclarationMode::FullTemplate {
+            warn!(
+                request_id = request.request_id,
+                granted_mode = %token_info.granted_mode,
+                "Full template job rejected: mode mismatch"
+            );
+            return Err(FullTemplateJobResponse::Error(
+                SetFullTemplateJobError::mode_mismatch(request.channel_id, request.request_id),
+            ));
+        }
+
+        // 4. Check prev_hash matches current (stale detection)
+        let current_prev_hash = self.current_prev_hash.read().await;
+        if let Some(expected_prev_hash) = *current_prev_hash {
+            if request.prev_hash != expected_prev_hash {
+                warn!(
+                    request_id = request.request_id,
+                    expected = ?hex::encode(expected_prev_hash),
+                    got = ?hex::encode(request.prev_hash),
+                    "Full template job rejected: stale prev_hash"
+                );
+                return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                    request.channel_id,
+                    request.request_id,
+                    SetFullTemplateJobErrorCode::StalePrevHash,
+                    "Previous block hash does not match current chain tip",
+                )));
+            }
+        }
+        drop(current_prev_hash);
+
+        // 5. Validate template using the validator
+        let validator = self.validator.read().await;
+        match validator.validate(&request) {
+            ValidationResult::Valid => {
+                // Template is valid, proceed to register the job
+            }
+            ValidationResult::Invalid(reason) => {
+                warn!(
+                    request_id = request.request_id,
+                    reason = %reason,
+                    "Full template job rejected: invalid template"
+                );
+                return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                    request.channel_id,
+                    request.request_id,
+                    SetFullTemplateJobErrorCode::InvalidTransactions,
+                    reason,
+                )));
+            }
+            ValidationResult::NeedTransactions(missing) => {
+                info!(
+                    request_id = request.request_id,
+                    missing_count = missing.len(),
+                    "Full template job needs missing transactions"
+                );
+                return Err(FullTemplateJobResponse::NeedTransactions(
+                    GetMissingTransactions::new(
+                        request.channel_id,
+                        request.request_id,
+                        missing,
+                    ),
+                ));
+            }
+        }
+        drop(validator);
+
+        // 6. Register the job
+        let job_id = match self.register_full_template_job(&request) {
+            Ok(id) => id,
+            Err(e) => {
+                error!(
+                    request_id = request.request_id,
+                    error = %e,
+                    "Failed to register full template job"
+                );
+                return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                    request.channel_id,
+                    request.request_id,
+                    SetFullTemplateJobErrorCode::Other,
+                    format!("Failed to register job: {}", e),
+                )));
+            }
+        };
+
+        info!(
+            request_id = request.request_id,
+            channel_id = request.channel_id,
+            job_id,
+            tx_count = request.tx_short_ids.len(),
+            "Full template job declared successfully"
+        );
+
+        Ok(SetFullTemplateJobSuccess::new(
+            request.channel_id,
+            request.request_id,
+            job_id,
+        ))
+    }
+
+    /// Register a full template job and return the assigned job ID
+    fn register_full_template_job(&self, job: &SetFullTemplateJob) -> Result<u32> {
+        // Generate job ID
+        let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst);
+
+        // Store job info with token
+        let job_info = DeclaredJobInfo {
+            job_id,
+            prev_hash: job.prev_hash,
+            merkle_root: job.merkle_root,
+            coinbase_tx: job.coinbase_tx.clone(),
+        };
+
+        self.token_manager
+            .set_job_info(&job.mining_job_token, job_info)?;
+
+        info!(
+            "Registered full template job {} with {} transactions",
+            job_id,
+            job.tx_short_ids.len()
+        );
+
+        Ok(job_id)
+    }
+
+    /// Update known transactions in the validator (from pool's mempool)
+    pub async fn update_known_txids(&self, txids: impl IntoIterator<Item = [u8; 32]>) {
+        let mut validator = self.validator.write().await;
+        validator.update_known_txids(txids);
+    }
+
     /// Get token manager (for testing)
     pub fn token_manager(&self) -> &TokenManager {
         &self.token_manager
@@ -277,6 +508,20 @@ impl JdServer {
     pub fn config(&self) -> &JdServerConfig {
         &self.config
     }
+
+    /// Get validator (for testing)
+    pub async fn validator(&self) -> tokio::sync::RwLockReadGuard<'_, TemplateValidator> {
+        self.validator.read().await
+    }
+}
+
+/// Response type for SetFullTemplateJob that can be either success, error, or need transactions
+#[derive(Debug)]
+pub enum FullTemplateJobResponse {
+    /// Job rejected with error
+    Error(SetFullTemplateJobError),
+    /// Need missing transactions from client
+    NeedTransactions(GetMissingTransactions),
 }
 
 /// Handle a JD client connection
@@ -357,11 +602,15 @@ pub async fn handle_jd_client(
                     client_id,
                     request_id = request.request_id,
                     user_id = %request.user_identifier,
+                    requested_mode = %request.requested_mode,
                     "Received AllocateMiningJobToken"
                 );
 
-                match jd_server.handle_allocate_token(request.request_id, &request.user_identifier)
-                {
+                match jd_server.handle_allocate_token(
+                    request.request_id,
+                    &request.user_identifier,
+                    request.requested_mode,
+                ) {
                     Ok(response) => {
                         let encoded = encode_allocate_token_success(&response)?;
                         stream.write_all(&encoded).await?;
@@ -421,6 +670,35 @@ pub async fn handle_jd_client(
                 }
             }
 
+            message_types::SET_FULL_TEMPLATE_JOB => {
+                let request = decode_set_full_template_job(&full_message)?;
+                debug!(
+                    client_id,
+                    channel_id = request.channel_id,
+                    request_id = request.request_id,
+                    tx_count = request.tx_short_ids.len(),
+                    "Received SetFullTemplateJob"
+                );
+
+                match jd_server.handle_set_full_template_job(request).await {
+                    Ok(response) => {
+                        let encoded = encode_set_full_template_job_success(&response)?;
+                        stream.write_all(&encoded).await?;
+                        stream.flush().await?;
+                    }
+                    Err(FullTemplateJobResponse::Error(error)) => {
+                        let encoded = encode_set_full_template_job_error(&error)?;
+                        stream.write_all(&encoded).await?;
+                        stream.flush().await?;
+                    }
+                    Err(FullTemplateJobResponse::NeedTransactions(request)) => {
+                        let encoded = encode_get_missing_transactions(&request)?;
+                        stream.write_all(&encoded).await?;
+                        stream.flush().await?;
+                    }
+                }
+            }
+
             _ => {
                 warn!(
                     client_id,
@@ -458,8 +736,12 @@ mod tests {
         let payout_tracker = Arc::new(PayoutTracker::default());
         let server = JdServer::new(config.clone(), payout_tracker);
 
-        // Verify we can allocate a token
-        let result = server.handle_allocate_token(1, "test-miner");
+        // Verify we can allocate a token (default CoinbaseOnly mode)
+        let result = server.handle_allocate_token(
+            1,
+            "test-miner",
+            JobDeclarationMode::CoinbaseOnly,
+        );
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -471,6 +753,7 @@ mod tests {
         );
         assert_eq!(response.coinbase_output, config.pool_payout_script);
         assert!(response.async_mining_allowed);
+        assert_eq!(response.granted_mode, JobDeclarationMode::CoinbaseOnly);
     }
 
     #[tokio::test]
@@ -484,7 +767,9 @@ mod tests {
         server.set_current_prev_hash(prev_hash).await;
 
         // Allocate a token
-        let token_response = server.handle_allocate_token(1, "test-miner").unwrap();
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
 
         // Declare a job
         let job_request = SetCustomMiningJob {
@@ -520,7 +805,9 @@ mod tests {
         server.set_current_prev_hash(current_prev_hash).await;
 
         // Allocate a token
-        let token_response = server.handle_allocate_token(1, "test-miner").unwrap();
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
 
         // Try to declare a job with a different (stale) prev_hash
         let stale_prev_hash = [0x11; 32]; // Different from current
@@ -578,7 +865,9 @@ mod tests {
         let server = JdServer::new(config, payout_tracker);
 
         // Allocate a token
-        let token_response = server.handle_allocate_token(1, "test-miner").unwrap();
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
 
         // Try to declare a job with empty coinbase
         let job_request = SetCustomMiningJob {
@@ -647,8 +936,12 @@ mod tests {
         server.set_current_prev_hash(prev_hash).await;
 
         // Allocate tokens and declare multiple jobs
-        let token1 = server.handle_allocate_token(1, "miner1").unwrap();
-        let token2 = server.handle_allocate_token(2, "miner2").unwrap();
+        let token1 = server
+            .handle_allocate_token(1, "miner1", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
+        let token2 = server
+            .handle_allocate_token(2, "miner2", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
 
         let job1 = SetCustomMiningJob {
             channel_id: 1,
@@ -681,5 +974,243 @@ mod tests {
 
         // Job IDs should be different
         assert_ne!(result1.job_id, result2.job_id);
+    }
+
+    // =========================================================================
+    // Full-Template Mode Tests
+    // =========================================================================
+
+    fn test_config_full_template() -> JdServerConfig {
+        JdServerConfig {
+            token_lifetime: Duration::from_secs(300),
+            coinbase_output_max_additional_size: 256,
+            pool_payout_script: vec![], // Empty for testing (skips payout validation)
+            async_mining_allowed: true,
+            max_tokens_per_client: 10,
+            noise_enabled: false,
+            full_template_enabled: true, // Enable Full-Template mode
+            full_template_validation: crate::validation::ValidationLevel::Standard,
+            min_pool_payout: 0,
+        }
+    }
+
+    #[test]
+    fn test_full_template_mode_requested_and_granted() {
+        let config = test_config_full_template();
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Request Full-Template mode
+        let result = server.handle_allocate_token(
+            1,
+            "test-miner",
+            JobDeclarationMode::FullTemplate,
+        );
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.granted_mode, JobDeclarationMode::FullTemplate);
+    }
+
+    #[test]
+    fn test_full_template_mode_fallback_when_disabled() {
+        let config = test_config(); // Full-Template disabled
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Request Full-Template mode, but it's disabled
+        let result = server.handle_allocate_token(
+            1,
+            "test-miner",
+            JobDeclarationMode::FullTemplate,
+        );
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        // Should fall back to CoinbaseOnly
+        assert_eq!(response.granted_mode, JobDeclarationMode::CoinbaseOnly);
+    }
+
+    #[tokio::test]
+    async fn test_full_template_job_success() {
+        let config = test_config_full_template();
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Set current prev_hash
+        let prev_hash = [0xaa; 32];
+        server.set_current_prev_hash(prev_hash).await;
+
+        // Allocate a token with FullTemplate mode
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::FullTemplate)
+            .unwrap();
+        assert_eq!(token_response.granted_mode, JobDeclarationMode::FullTemplate);
+
+        // Declare a full template job
+        let job_request = SetFullTemplateJob {
+            channel_id: 1,
+            request_id: 2,
+            mining_job_token: token_response.mining_job_token,
+            version: 5,
+            prev_hash,
+            merkle_root: [0xbb; 32],
+            block_commitments: [0xcc; 32],
+            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            time: 1700000000,
+            bits: 0x1d00ffff,
+            tx_short_ids: vec![], // Empty for simplicity
+            tx_data: vec![],
+        };
+
+        let result = server.handle_set_full_template_job(job_request).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.channel_id, 1);
+        assert_eq!(response.request_id, 2);
+        assert!(response.job_id > 0);
+    }
+
+    #[tokio::test]
+    async fn test_full_template_job_mode_mismatch() {
+        let config = test_config_full_template();
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Allocate a token with CoinbaseOnly mode
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::CoinbaseOnly)
+            .unwrap();
+        assert_eq!(token_response.granted_mode, JobDeclarationMode::CoinbaseOnly);
+
+        // Try to declare a full template job with CoinbaseOnly token
+        let job_request = SetFullTemplateJob {
+            channel_id: 1,
+            request_id: 2,
+            mining_job_token: token_response.mining_job_token,
+            version: 5,
+            prev_hash: [0xaa; 32],
+            merkle_root: [0xbb; 32],
+            block_commitments: [0xcc; 32],
+            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            time: 1700000000,
+            bits: 0x1d00ffff,
+            tx_short_ids: vec![],
+            tx_data: vec![],
+        };
+
+        let result = server.handle_set_full_template_job(job_request).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            FullTemplateJobResponse::Error(error) => {
+                assert_eq!(error.error_code, SetFullTemplateJobErrorCode::ModeMismatch);
+            }
+            _ => panic!("Expected ModeMismatch error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_template_job_stale_prev_hash() {
+        let config = test_config_full_template();
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Set current prev_hash
+        let current_prev_hash = [0xaa; 32];
+        server.set_current_prev_hash(current_prev_hash).await;
+
+        // Allocate a token
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::FullTemplate)
+            .unwrap();
+
+        // Try to declare a job with a stale prev_hash
+        let job_request = SetFullTemplateJob {
+            channel_id: 1,
+            request_id: 2,
+            mining_job_token: token_response.mining_job_token,
+            version: 5,
+            prev_hash: [0x11; 32], // Different from current
+            merkle_root: [0xbb; 32],
+            block_commitments: [0xcc; 32],
+            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            time: 1700000000,
+            bits: 0x1d00ffff,
+            tx_short_ids: vec![],
+            tx_data: vec![],
+        };
+
+        let result = server.handle_set_full_template_job(job_request).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            FullTemplateJobResponse::Error(error) => {
+                assert_eq!(error.error_code, SetFullTemplateJobErrorCode::StalePrevHash);
+            }
+            _ => panic!("Expected StalePrevHash error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_template_job_needs_transactions() {
+        let config = test_config_full_template();
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Set current prev_hash
+        let prev_hash = [0xaa; 32];
+        server.set_current_prev_hash(prev_hash).await;
+
+        // Allocate a token
+        let token_response = server
+            .handle_allocate_token(1, "test-miner", JobDeclarationMode::FullTemplate)
+            .unwrap();
+
+        // Declare a job with unknown txids (validator doesn't know them)
+        let unknown_txid = [0x11; 32];
+        let job_request = SetFullTemplateJob {
+            channel_id: 1,
+            request_id: 2,
+            mining_job_token: token_response.mining_job_token,
+            version: 5,
+            prev_hash,
+            merkle_root: [0xbb; 32],
+            block_commitments: [0xcc; 32],
+            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            time: 1700000000,
+            bits: 0x1d00ffff,
+            tx_short_ids: vec![unknown_txid],
+            tx_data: vec![], // Not providing the tx data
+        };
+
+        let result = server.handle_set_full_template_job(job_request).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            FullTemplateJobResponse::NeedTransactions(request) => {
+                assert_eq!(request.channel_id, 1);
+                assert_eq!(request.request_id, 2);
+                assert_eq!(request.missing_tx_ids.len(), 1);
+                assert_eq!(request.missing_tx_ids[0], unknown_txid);
+            }
+            _ => panic!("Expected NeedTransactions"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_known_txids() {
+        let config = test_config_full_template();
+        let payout_tracker = Arc::new(PayoutTracker::default());
+        let server = JdServer::new(config, payout_tracker);
+
+        // Update known txids
+        let known_txid = [0x11; 32];
+        server.update_known_txids([known_txid]).await;
+
+        // Verify the validator knows about the txid
+        let validator = server.validator().await;
+        assert!(validator.is_txid_known(&known_txid));
     }
 }

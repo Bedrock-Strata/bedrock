@@ -39,10 +39,13 @@ fn test_token_flow() {
     let server = JdServer::new(config, payout);
 
     // Allocate token
-    let response = server.handle_allocate_token(1, "test-miner").unwrap();
+    let response = server
+        .handle_allocate_token(1, "test-miner", JobDeclarationMode::CoinbaseOnly)
+        .unwrap();
     assert_eq!(response.request_id, 1);
     assert!(!response.mining_job_token.is_empty());
     assert!(response.async_mining_allowed);
+    assert_eq!(response.granted_mode, JobDeclarationMode::CoinbaseOnly);
 }
 
 #[tokio::test]
@@ -57,7 +60,9 @@ async fn test_job_declaration_flow() {
     server.set_current_prev_hash(prev_hash).await;
 
     // Allocate token
-    let token_response = server.handle_allocate_token(1, "test-miner").unwrap();
+    let token_response = server
+        .handle_allocate_token(1, "test-miner", JobDeclarationMode::CoinbaseOnly)
+        .unwrap();
 
     // Declare job
     let request = SetCustomMiningJob {
@@ -131,7 +136,9 @@ async fn test_full_mining_flow() {
     server.set_current_prev_hash(prev_hash).await;
 
     // Step 1: Allocate token
-    let token_response = server.handle_allocate_token(1, "integration-test-miner").unwrap();
+    let token_response = server
+        .handle_allocate_token(1, "integration-test-miner", JobDeclarationMode::CoinbaseOnly)
+        .unwrap();
     assert!(!token_response.mining_job_token.is_empty());
     assert_eq!(token_response.coinbase_output, vec![0x76, 0xa9, 0x14]);
 
@@ -181,9 +188,15 @@ async fn test_multiple_miners() {
     server.set_current_prev_hash(prev_hash).await;
 
     // Allocate tokens for multiple miners
-    let token1 = server.handle_allocate_token(1, "miner-1").unwrap();
-    let token2 = server.handle_allocate_token(2, "miner-2").unwrap();
-    let token3 = server.handle_allocate_token(3, "miner-3").unwrap();
+    let token1 = server
+        .handle_allocate_token(1, "miner-1", JobDeclarationMode::CoinbaseOnly)
+        .unwrap();
+    let token2 = server
+        .handle_allocate_token(2, "miner-2", JobDeclarationMode::CoinbaseOnly)
+        .unwrap();
+    let token3 = server
+        .handle_allocate_token(3, "miner-3", JobDeclarationMode::CoinbaseOnly)
+        .unwrap();
 
     // All should have unique tokens
     assert_ne!(token1.mining_job_token, token2.mining_job_token);
@@ -224,7 +237,7 @@ async fn test_job_id_uniqueness() {
     // Declare multiple jobs and collect their IDs
     for i in 0..10 {
         let token = server
-            .handle_allocate_token(i, &format!("miner-{}", i))
+            .handle_allocate_token(i, &format!("miner-{}", i), JobDeclarationMode::CoinbaseOnly)
             .unwrap();
 
         let job = SetCustomMiningJob {

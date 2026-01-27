@@ -133,6 +133,8 @@ impl JdClient {
         let request = AllocateMiningJobToken {
             request_id: 1,
             user_identifier: self.config.user_identifier.clone(),
+            // Default to CoinbaseOnly mode for now (Full-Template support in future phase)
+            requested_mode: zcash_jd_server::JobDeclarationMode::CoinbaseOnly,
         };
 
         let encoded = encode_allocate_token(&request)?;

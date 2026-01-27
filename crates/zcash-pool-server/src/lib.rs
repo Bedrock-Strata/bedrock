@@ -12,11 +12,9 @@ pub mod duplicate;
 pub mod error;
 pub mod job;
 pub mod payout;
+pub mod server;
 pub mod session;
 pub mod share;
-
-// TODO: These modules will be implemented in subsequent tasks
-// pub mod server;
 
 pub use channel::{Channel, ChannelJob};
 pub use config::PoolConfig;
@@ -24,6 +22,6 @@ pub use duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 pub use error::PoolError;
 pub use job::JobDistributor;
 pub use payout::{MinerId, MinerStats, PayoutTracker};
+pub use server::{PoolServer, PoolStats};
 pub use session::{ServerMessage, Session, SessionMessage};
 pub use share::{ShareProcessor, ShareValidationResult};
-// pub use server::PoolServer;

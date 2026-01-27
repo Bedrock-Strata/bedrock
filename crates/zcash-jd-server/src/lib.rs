@@ -19,15 +19,15 @@
 //! 5. Client can submit solutions via `PushSolution`
 
 // TODO: Uncomment these modules as they are implemented
-// pub mod config;
-// pub mod error;
+pub mod config;
+pub mod error;
 pub mod messages;
 // pub mod codec;
 // pub mod token;
 // pub mod server;
 
 // TODO: Re-export types as modules are implemented
-// pub use config::JdServerConfig;
-// pub use error::JdServerError;
+pub use config::JdServerConfig;
+pub use error::{JdServerError, Result};
 pub use messages::*;
 // pub use server::JdServer;

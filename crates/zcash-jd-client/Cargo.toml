@@ -1,0 +1,29 @@
+[package]
+name = "zcash-jd-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Job Declaration Client for Zcash Stratum V2"
+
+[[bin]]
+name = "zcash-jd-client"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+byteorder = "1.5"
+clap = { version = "4.4", features = ["derive"] }
+hex.workspace = true
+
+# Local dependencies
+zcash-template-provider = { path = "../zcash-template-provider" }
+zcash-jd-server = { path = "../zcash-jd-server" }
+zcash-mining-protocol = { path = "../zcash-mining-protocol" }
+zcash-equihash-validator = { path = "../zcash-equihash-validator" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

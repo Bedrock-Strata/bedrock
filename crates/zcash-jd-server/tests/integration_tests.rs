@@ -24,6 +24,7 @@ fn test_config() -> JdServerConfig {
         pool_payout_script: vec![0x76, 0xa9, 0x14], // P2PKH prefix
         async_mining_allowed: true,
         max_tokens_per_client: 10,
+        noise_enabled: false,
     }
 }
 

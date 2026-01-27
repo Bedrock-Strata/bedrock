@@ -2603,6 +2603,7 @@ dependencies = [
  "tracing",
  "zcash-mining-protocol",
  "zcash-pool-common",
+ "zcash-stratum-noise",
 ]
 
 [[package]]

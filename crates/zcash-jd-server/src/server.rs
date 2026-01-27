@@ -281,11 +281,40 @@ impl JdServer {
 ///
 /// This function reads frames from the TCP stream, parses message types,
 /// dispatches to the appropriate handlers, and writes responses.
+///
+/// # Noise Protocol Support
+///
+/// When `noise_enabled` is true in the server config, this function should
+/// perform the Noise NK handshake before processing messages. The integration
+/// would involve:
+///
+/// 1. Use `zcash_stratum_noise::NoiseResponder` for the server side
+/// 2. Perform handshake: `let mut noise_stream = responder.handshake(stream).await?`
+/// 3. Use `noise_stream` (which implements AsyncRead + AsyncWrite) for all I/O
+///
+/// TODO: Refactor this function to be generic over `AsyncRead + AsyncWrite + Unpin`
+/// to support both plain TCP and Noise-encrypted streams. Example signature:
+/// ```ignore
+/// pub async fn handle_jd_client<S>(
+///     mut stream: S,
+///     jd_server: Arc<JdServer>,
+///     client_id: String,
+/// ) -> Result<()>
+/// where
+///     S: AsyncRead + AsyncWrite + Unpin,
+/// ```
 pub async fn handle_jd_client(
     mut stream: TcpStream,
     jd_server: Arc<JdServer>,
     client_id: String,
 ) -> Result<()> {
+    // TODO: When noise_enabled is true in config, wrap `stream` with Noise:
+    // if jd_server.config().noise_enabled {
+    //     let responder = NoiseResponder::new(server_static_keypair);
+    //     let noise_stream = responder.handshake(stream).await?;
+    //     return handle_jd_client_inner(noise_stream, jd_server, client_id).await;
+    // }
+
     info!(client_id, "JD client connected");
 
     let mut header_buf = [0u8; MessageFrame::HEADER_SIZE];
@@ -414,6 +443,7 @@ mod tests {
             pool_payout_script: vec![0x76, 0xa9, 0x14], // P2PKH prefix
             async_mining_allowed: true,
             max_tokens_per_client: 10,
+            noise_enabled: false,
         }
     }
 

@@ -19,6 +19,9 @@ pub struct JdServerConfig {
 
     /// Maximum active tokens per client
     pub max_tokens_per_client: usize,
+
+    /// Enable Noise encryption for JD client connections
+    pub noise_enabled: bool,
 }
 
 impl Default for JdServerConfig {
@@ -29,6 +32,7 @@ impl Default for JdServerConfig {
             pool_payout_script: vec![], // Must be set by operator
             async_mining_allowed: true,
             max_tokens_per_client: 10,
+            noise_enabled: false,
         }
     }
 }

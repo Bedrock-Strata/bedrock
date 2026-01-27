@@ -41,13 +41,14 @@ pub struct ChannelJob {
 impl Channel {
     /// Create a new channel with the given nonce_1 prefix
     pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
+        assert!(nonce_1.len() <= 32, "nonce_1 length must be ≤ 32 bytes");
         let nonce_2_len = 32 - nonce_1.len() as u8;
         Self {
             id: NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst),
             nonce_1,
             nonce_2_len,
             vardiff: VardiffController::new(vardiff_config),
-            jobs: HashMap::new(),
+            jobs: HashMap::with_capacity(10),
             last_job_id: 0,
         }
     }

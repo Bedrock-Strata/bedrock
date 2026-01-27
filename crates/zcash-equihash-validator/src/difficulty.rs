@@ -1,16 +1,194 @@
-//! Difficulty utilities (TODO)
+//! Difficulty and target calculations for Zcash mining
 //!
-//! This module will provide difficulty target conversion and utilities.
+//! Zcash uses a 256-bit target. A valid share must have a hash <= target.
+//! Difficulty is inversely proportional to target.
 
-/// Placeholder for target type
-pub struct Target;
+use std::cmp::Ordering;
 
-/// Placeholder for compact to target conversion
-pub fn compact_to_target(_compact: u32) -> [u8; 32] {
-    [0u8; 32]
+/// 256-bit target value
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target(pub [u8; 32]);
+
+impl Target {
+    /// Create a target from bytes (little-endian)
+    pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Get bytes as little-endian
+    pub fn to_le_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Maximum target (difficulty 1)
+    pub fn max() -> Self {
+        // Zcash's powLimit for mainnet
+        // 0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+        let mut target = [0xff; 32];
+        target[28] = 0x07;
+        target[29] = 0x00;
+        target[30] = 0x00;
+        target[31] = 0x00;
+        Self(target)
+    }
+
+    /// Check if a hash meets this target (hash <= target)
+    pub fn is_met_by(&self, hash: &[u8; 32]) -> bool {
+        // Compare as little-endian 256-bit integers
+        for i in (0..32).rev() {
+            match hash[i].cmp(&self.0[i]) {
+                Ordering::Less => return true,
+                Ordering::Greater => return false,
+                Ordering::Equal => continue,
+            }
+        }
+        true // Equal is valid
+    }
 }
 
-/// Placeholder for target to difficulty conversion
-pub fn target_to_difficulty(_target: &[u8; 32]) -> f64 {
-    1.0
+impl PartialOrd for Target {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Target {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Compare as little-endian 256-bit integers
+        for i in (0..32).rev() {
+            match self.0[i].cmp(&other.0[i]) {
+                Ordering::Equal => continue,
+                other => return other,
+            }
+        }
+        Ordering::Equal
+    }
+}
+
+/// Convert compact "bits" representation to full target
+///
+/// The compact format is: mantissa * 256^(exponent-3)
+/// where exponent is the first byte and mantissa is the next 3 bytes
+pub fn compact_to_target(compact: u32) -> Target {
+    let bytes = compact.to_be_bytes();
+    let exponent = bytes[0] as usize;
+    let mantissa = ((bytes[1] as u32) << 16) | ((bytes[2] as u32) << 8) | (bytes[3] as u32);
+
+    let mut target = [0u8; 32];
+
+    if exponent <= 3 {
+        // Mantissa fits in lower bytes
+        let shift = 3 - exponent;
+        let value = mantissa >> (8 * shift);
+        target[0] = (value & 0xff) as u8;
+        if exponent >= 2 {
+            target[1] = ((value >> 8) & 0xff) as u8;
+        }
+        if exponent >= 3 {
+            target[2] = ((value >> 16) & 0xff) as u8;
+        }
+    } else {
+        // Place mantissa at exponent-3 position
+        let pos = exponent - 3;
+        if pos < 32 {
+            target[pos] = (mantissa & 0xff) as u8;
+        }
+        if pos + 1 < 32 {
+            target[pos + 1] = ((mantissa >> 8) & 0xff) as u8;
+        }
+        if pos + 2 < 32 {
+            target[pos + 2] = ((mantissa >> 16) & 0xff) as u8;
+        }
+    }
+
+    Target(target)
+}
+
+/// Convert target to difficulty
+///
+/// Difficulty = max_target / target
+pub fn target_to_difficulty(target: &Target) -> f64 {
+    let max = Target::max();
+
+    // Convert to f64 for division (approximate but sufficient for display)
+    let max_val = target_to_f64(&max);
+    let target_val = target_to_f64(target);
+
+    if target_val == 0.0 {
+        return f64::INFINITY;
+    }
+
+    max_val / target_val
+}
+
+/// Convert difficulty to target
+///
+/// Target = max_target / difficulty
+pub fn difficulty_to_target(difficulty: f64) -> Target {
+    if difficulty <= 0.0 {
+        return Target::max();
+    }
+
+    let max = Target::max();
+    let max_val = target_to_f64(&max);
+    let target_val = max_val / difficulty;
+
+    f64_to_target(target_val)
+}
+
+/// Convert target to approximate f64 (loses precision for very large values)
+fn target_to_f64(target: &Target) -> f64 {
+    let mut result = 0.0f64;
+    for i in (0..32).rev() {
+        result = result * 256.0 + (target.0[i] as f64);
+    }
+    result
+}
+
+/// Convert f64 to target (approximate)
+fn f64_to_target(mut value: f64) -> Target {
+    let mut target = [0u8; 32];
+    for i in 0..32 {
+        let byte = (value % 256.0) as u8;
+        target[i] = byte;
+        value = (value - byte as f64) / 256.0;
+    }
+    Target(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_target_comparison() {
+        let low = Target([0x01; 32]);
+        let high = Target([0xff; 32]);
+
+        assert!(low < high);
+        assert!(high > low);
+    }
+
+    #[test]
+    fn test_is_met_by() {
+        let target = Target([0x10; 32]);
+        let good_hash = [0x0f; 32];
+        let bad_hash = [0x11; 32];
+
+        assert!(target.is_met_by(&good_hash));
+        assert!(!target.is_met_by(&bad_hash));
+    }
+
+    #[test]
+    fn test_difficulty_roundtrip() {
+        let difficulties = [1.0, 2.0, 100.0, 1000.0, 1_000_000.0];
+
+        for &diff in &difficulties {
+            let target = difficulty_to_target(diff);
+            let recovered = target_to_difficulty(&target);
+            // Allow 1% error due to floating point
+            let ratio = recovered / diff;
+            assert!(ratio > 0.99 && ratio < 1.01, "diff={}, recovered={}", diff, recovered);
+        }
+    }
 }

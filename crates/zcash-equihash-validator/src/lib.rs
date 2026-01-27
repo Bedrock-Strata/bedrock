@@ -12,5 +12,5 @@ pub mod vardiff;
 
 pub use error::ValidationError;
 pub use validator::EquihashValidator;
-pub use difficulty::{Target, compact_to_target, target_to_difficulty};
+pub use difficulty::{Target, compact_to_target, target_to_difficulty, difficulty_to_target};
 pub use vardiff::VardiffController;

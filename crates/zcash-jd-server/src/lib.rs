@@ -22,12 +22,13 @@
 pub mod config;
 pub mod error;
 pub mod messages;
+pub mod token;
 // pub mod codec;
-// pub mod token;
 // pub mod server;
 
 // TODO: Re-export types as modules are implemented
 pub use config::JdServerConfig;
 pub use error::{JdServerError, Result};
 pub use messages::*;
+pub use token::{DeclaredJobInfo, MiningJobToken, TokenManager};
 // pub use server::JdServer;

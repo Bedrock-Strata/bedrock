@@ -13,4 +13,4 @@ pub mod types;
 pub use commitments::calculate_block_commitments_hash;
 pub use error::Error;
 pub use header::{assemble_header, parse_target};
-pub use template::TemplateProvider;
+pub use template::{TemplateProvider, TemplateProviderConfig};

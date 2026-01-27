@@ -18,15 +18,13 @@
 //! 4. Server validates and responds with `SetCustomMiningJobSuccess` or error
 //! 5. Client can submit solutions via `PushSolution`
 
-// TODO: Uncomment these modules as they are implemented
 pub mod codec;
 pub mod config;
 pub mod error;
 pub mod messages;
+pub mod server;
 pub mod token;
-// pub mod server;
 
-// TODO: Re-export types as modules are implemented
 pub use codec::{
     decode_allocate_token, decode_allocate_token_success, decode_push_solution,
     decode_set_custom_job, decode_set_custom_job_error, decode_set_custom_job_success,
@@ -36,5 +34,5 @@ pub use codec::{
 pub use config::JdServerConfig;
 pub use error::{JdServerError, Result};
 pub use messages::*;
+pub use server::{handle_jd_client, JdServer};
 pub use token::{DeclaredJobInfo, MiningJobToken, TokenManager};
-// pub use server::JdServer;

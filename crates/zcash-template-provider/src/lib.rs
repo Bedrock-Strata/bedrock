@@ -5,10 +5,12 @@
 
 pub mod commitments;
 pub mod error;
+pub mod header;
 pub mod rpc;
 pub mod template;
 pub mod types;
 
 pub use commitments::calculate_block_commitments_hash;
 pub use error::Error;
+pub use header::{assemble_header, parse_target};
 pub use template::TemplateProvider;

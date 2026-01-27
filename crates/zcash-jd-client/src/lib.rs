@@ -6,14 +6,14 @@
 //! - Declares jobs to a pool's JD Server
 //! - Submits found blocks to both Zebra and the pool
 
-// pub mod client;
+pub mod block_submitter;
+pub mod client;
 pub mod config;
 pub mod error;
 pub mod template_builder;
-pub mod block_submitter;
 
-// pub use client::JdClient;
+pub use block_submitter::BlockSubmitter;
+pub use client::JdClient;
 pub use config::JdClientConfig;
 pub use error::JdClientError;
-pub use block_submitter::BlockSubmitter;
 pub use template_builder::TemplateBuilder;

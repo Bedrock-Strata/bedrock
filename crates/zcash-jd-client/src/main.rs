@@ -1,24 +1,30 @@
 //! Zcash JD Client binary
 
 use clap::Parser;
-use zcash_jd_client::JdClientConfig;
+use tracing::info;
+use zcash_jd_client::{JdClient, JdClientConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "zcash-jd-client")]
 #[command(about = "Zcash Job Declaration Client for Stratum V2")]
 struct Args {
+    /// Zebra RPC URL
     #[arg(long, default_value = "http://127.0.0.1:8232")]
     zebra_url: String,
 
+    /// Pool JD Server address
     #[arg(long, default_value = "127.0.0.1:3334")]
     pool_jd_addr: String,
 
+    /// User identifier for job allocation
     #[arg(long, default_value = "zcash-jd-client")]
     user_id: String,
 
+    /// Template polling interval in milliseconds
     #[arg(long, default_value = "1000")]
     poll_interval: u64,
 
+    /// Optional miner payout address
     #[arg(long)]
     payout_address: Option<String>,
 }
@@ -37,14 +43,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         miner_payout_address: args.payout_address,
     };
 
-    println!("=== Zcash JD Client ===");
-    println!("Zebra RPC: {}", config.zebra_url);
-    println!("Pool JD Server: {}", config.pool_jd_addr);
-    println!("User ID: {}", config.user_identifier);
-    println!();
+    info!("=== Zcash JD Client ===");
+    info!("Zebra RPC: {}", config.zebra_url);
+    info!("Pool JD Server: {}", config.pool_jd_addr);
+    info!("User ID: {}", config.user_identifier);
+    info!("Poll interval: {}ms", config.template_poll_ms);
 
-    // TODO: Start client in Tasks 7-9
-    println!("JD Client stub - implementation coming in Tasks 7-9");
+    let client = JdClient::new(config)?;
+    client.run().await?;
 
     Ok(())
 }

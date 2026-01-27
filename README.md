@@ -9,6 +9,7 @@ Implementation of Stratum V2 mining protocol for Zcash with support for decentra
 - Phase 3: Pool Server MVP - **Complete**
 - Phase 4: Job Declaration Protocol - **Complete**
 - Phase 5: Security & Observability - **Complete**
+- Phase 6: Full-Template Mode - **Complete**
 
 ## Crates
 

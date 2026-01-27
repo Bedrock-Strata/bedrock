@@ -28,6 +28,32 @@ zcash-jd-client \
 | `--poll-interval` | 1000 | Template poll ms |
 | `--payout-address` | None | Optional extra output |
 
+## Full-Template Mode
+
+Enable Full-Template mode to control transaction selection:
+
+```bash
+zcash-jd-client \
+  --zebra-url http://127.0.0.1:8232 \
+  --pool-jd-addr 192.168.1.100:3334 \
+  --user-id my-miner \
+  --full-template \
+  --tx-selection all
+```
+
+### Full-Template Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--full-template` | false | Enable Full-Template mode |
+| `--tx-selection` | all | Transaction selection (all, by-fee-rate) |
+
+In Full-Template mode, the client:
+1. Requests a token with `FullTemplate` mode
+2. Builds complete block templates including transaction selection
+3. Sends `SetFullTemplateJob` with the selected transactions
+4. Responds to `GetMissingTransactions` requests from the server
+
 ## Requirements
 
 - Running Zebra node with RPC enabled

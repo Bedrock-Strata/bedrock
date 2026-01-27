@@ -33,13 +33,45 @@ let jd_server = JdServer::new(config, payout_tracker);
 | SetCustomMiningJob.Success/Error | Server -> Client | Acknowledge/reject |
 | PushSolution | Client -> Server | Submit block |
 
-## Protocol Flow
+## Protocol Flow (Coinbase-Only Mode)
 
 1. Client requests a token via `AllocateMiningJobToken`
 2. Server responds with `AllocateMiningJobTokenSuccess` containing the token
 3. Client declares a job via `SetCustomMiningJob` with the token
 4. Server validates and responds with `SetCustomMiningJobSuccess` or error
 5. Client can submit solutions via `PushSolution`
+
+## Full-Template Mode
+
+In addition to Coinbase-Only mode, the JD Server supports Full-Template mode where miners can select which transactions to include in their blocks.
+
+### Enabling Full-Template Mode
+
+```rust
+let config = JdServerConfig {
+    full_template_enabled: true,
+    full_template_validation: ValidationLevel::Standard,
+    min_pool_payout: 0,
+    ..Default::default()
+};
+```
+
+### Validation Levels
+
+| Level | Description |
+|-------|-------------|
+| `Minimal` | Only verify pool payout output exists |
+| `Standard` | Verify pool payout + request missing transactions |
+| `Strict` | Full validation of all transactions |
+
+### Protocol Flow (Full-Template)
+
+1. Client requests token with `JobDeclarationMode::FullTemplate`
+2. Server grants FullTemplate mode if enabled (falls back to CoinbaseOnly otherwise)
+3. Client sends `SetFullTemplateJob` with transactions
+4. If server needs missing transactions, it sends `GetMissingTransactions`
+5. Client responds with `ProvideMissingTransactions`
+6. Server validates and responds with success or error
 
 ## Configuration
 
@@ -50,6 +82,9 @@ let jd_server = JdServer::new(config, payout_tracker);
 | `async_mining_allowed` | true | Allow mining before ack |
 | `pool_payout_script` | empty | Pool's payout output script |
 | `max_tokens_per_client` | 10 | Max active tokens per client |
+| `full_template_enabled` | false | Enable Full-Template mode |
+| `full_template_validation` | Standard | Validation level for Full-Template |
+| `min_pool_payout` | 0 | Minimum pool payout (zatoshis) |
 
 ## License
 

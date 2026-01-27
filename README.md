@@ -7,6 +7,7 @@ Implementation of Stratum V2 mining protocol for Zcash with support for decentra
 - Phase 1: Zcash Template Provider - **Complete**
 - Phase 2: Equihash Mining Protocol - **Complete**
 - Phase 3: Pool Server MVP - **Complete**
+- Phase 4: Job Declaration Protocol - **Complete**
 
 ## Crates
 
@@ -16,6 +17,9 @@ Implementation of Stratum V2 mining protocol for Zcash with support for decentra
 | `zcash-mining-protocol` | SV2 message types for Equihash mining |
 | `zcash-equihash-validator` | Share validation and vardiff |
 | `zcash-pool-server` | Pool server accepting miner connections |
+| `zcash-pool-common` | Shared types for pool components (PPS tracking) |
+| `zcash-jd-server` | Job Declaration Server for custom mining jobs |
+| `zcash-jd-client` | Job Declaration Client for decentralized templates |
 
 ## Building
 

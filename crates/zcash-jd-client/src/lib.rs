@@ -10,10 +10,12 @@ pub mod block_submitter;
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod full_template;
 pub mod template_builder;
 
 pub use block_submitter::BlockSubmitter;
 pub use client::JdClient;
 pub use config::{JdClientConfig, TxSelectionStrategy};
 pub use error::JdClientError;
+pub use full_template::FullTemplateBuilder;
 pub use template_builder::TemplateBuilder;

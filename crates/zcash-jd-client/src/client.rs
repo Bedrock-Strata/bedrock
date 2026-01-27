@@ -7,6 +7,7 @@
 use crate::block_submitter::BlockSubmitter;
 use crate::config::JdClientConfig;
 use crate::error::{JdClientError, Result};
+use crate::full_template::FullTemplateBuilder;
 use crate::template_builder::TemplateBuilder;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,6 +29,8 @@ pub struct JdClient {
     template_provider: Arc<TemplateProvider>,
     /// Template builder for constructing custom coinbase
     template_builder: Arc<RwLock<TemplateBuilder>>,
+    /// Full template builder for Full-Template mode (optional)
+    full_template_builder: Option<FullTemplateBuilder>,
     /// Block submitter for submitting found blocks to Zebra
     #[allow(dead_code)]
     block_submitter: BlockSubmitter,
@@ -47,18 +50,36 @@ impl JdClient {
 
         let template_provider = TemplateProvider::new(template_config)?;
 
+        // Create full template builder if in Full-Template mode
+        let full_template_builder = if config.full_template_mode {
+            Some(FullTemplateBuilder::new(config.tx_selection))
+        } else {
+            None
+        };
+
         Ok(Self {
             template_builder: Arc::new(RwLock::new(TemplateBuilder::new(
                 vec![],
                 0,
                 config.miner_payout_address.clone(),
             ))),
+            full_template_builder,
             block_submitter: BlockSubmitter::new(config.zebra_url.clone()),
             config,
             template_provider: Arc::new(template_provider),
             current_token: Arc::new(RwLock::new(None)),
             current_job_id: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Check if the client is operating in Full-Template mode
+    pub fn is_full_template_mode(&self) -> bool {
+        self.full_template_builder.is_some()
+    }
+
+    /// Get a reference to the full template builder (if in Full-Template mode)
+    pub fn full_template_builder(&self) -> Option<&FullTemplateBuilder> {
+        self.full_template_builder.as_ref()
     }
 
     /// Run the JD Client
@@ -297,6 +318,7 @@ impl JdClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TxSelectionStrategy;
 
     #[test]
     fn test_jd_client_config() {
@@ -322,5 +344,49 @@ mod tests {
 
         // Initially no template
         assert!(client.current_template().await.is_none());
+    }
+
+    #[test]
+    fn test_jd_client_coinbase_only_mode() {
+        let config = JdClientConfig {
+            full_template_mode: false,
+            ..Default::default()
+        };
+        let client = JdClient::new(config).unwrap();
+
+        // Should not have full template builder
+        assert!(!client.is_full_template_mode());
+        assert!(client.full_template_builder().is_none());
+    }
+
+    #[test]
+    fn test_jd_client_full_template_mode() {
+        let config = JdClientConfig {
+            full_template_mode: true,
+            tx_selection: TxSelectionStrategy::All,
+            ..Default::default()
+        };
+        let client = JdClient::new(config).unwrap();
+
+        // Should have full template builder
+        assert!(client.is_full_template_mode());
+        assert!(client.full_template_builder().is_some());
+
+        let builder = client.full_template_builder().unwrap();
+        assert_eq!(builder.strategy(), TxSelectionStrategy::All);
+    }
+
+    #[test]
+    fn test_jd_client_full_template_mode_by_fee_rate() {
+        let config = JdClientConfig {
+            full_template_mode: true,
+            tx_selection: TxSelectionStrategy::ByFeeRate,
+            ..Default::default()
+        };
+        let client = JdClient::new(config).unwrap();
+
+        assert!(client.is_full_template_mode());
+        let builder = client.full_template_builder().unwrap();
+        assert_eq!(builder.strategy(), TxSelectionStrategy::ByFeeRate);
     }
 }

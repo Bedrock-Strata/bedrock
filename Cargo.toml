@@ -19,3 +19,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 blake2b_simd = "1.0"
+byteorder = "1.5"

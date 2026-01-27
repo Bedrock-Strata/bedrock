@@ -9,9 +9,10 @@
 // pub mod client;
 pub mod config;
 pub mod error;
-// pub mod template_builder;
+pub mod template_builder;
 // pub mod block_submitter;
 
 // pub use client::JdClient;
 pub use config::JdClientConfig;
 pub use error::JdClientError;
+pub use template_builder::TemplateBuilder;

@@ -19,14 +19,20 @@
 //! 5. Client can submit solutions via `PushSolution`
 
 // TODO: Uncomment these modules as they are implemented
+pub mod codec;
 pub mod config;
 pub mod error;
 pub mod messages;
 pub mod token;
-// pub mod codec;
 // pub mod server;
 
 // TODO: Re-export types as modules are implemented
+pub use codec::{
+    decode_allocate_token, decode_allocate_token_success, decode_push_solution,
+    decode_set_custom_job, decode_set_custom_job_error, decode_set_custom_job_success,
+    encode_allocate_token, encode_allocate_token_success, encode_push_solution,
+    encode_set_custom_job, encode_set_custom_job_error, encode_set_custom_job_success,
+};
 pub use config::JdServerConfig;
 pub use error::{JdServerError, Result};
 pub use messages::*;

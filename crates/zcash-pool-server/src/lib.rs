@@ -6,6 +6,7 @@
 //! - Validates submitted shares
 //! - Tracks contributions for PPS payout
 
+pub mod channel;
 pub mod config;
 pub mod duplicate;
 pub mod error;
@@ -14,10 +15,10 @@ pub mod payout;
 // TODO: These modules will be implemented in subsequent tasks
 // pub mod server;
 // pub mod session;
-// pub mod channel;
 // pub mod job;
 // pub mod share;
 
+pub use channel::{Channel, ChannelJob};
 pub use config::PoolConfig;
 pub use duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 pub use error::PoolError;

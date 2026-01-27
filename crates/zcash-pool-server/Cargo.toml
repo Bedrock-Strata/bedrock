@@ -16,6 +16,7 @@ rustc-hash = "2.0"
 zcash-template-provider = { path = "../zcash-template-provider" }
 zcash-mining-protocol = { path = "../zcash-mining-protocol" }
 zcash-equihash-validator = { path = "../zcash-equihash-validator" }
+byteorder.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

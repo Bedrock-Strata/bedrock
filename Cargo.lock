@@ -1654,6 +1654,7 @@ dependencies = [
 name = "zcash-pool-server"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "rustc-hash",
  "serde",
  "thiserror",

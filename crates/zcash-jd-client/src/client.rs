@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use zcash_jd_server::codec::*;
 use zcash_jd_server::messages::*;
 use zcash_mining_protocol::codec::MessageFrame;
+use zcash_stratum_noise::{NoiseInitiator, PublicKey};
 use zcash_template_provider::types::BlockTemplate;
 use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
 
@@ -68,6 +69,21 @@ impl JdClient {
         info!("Starting JD Client");
 
         // Connect to pool JD Server
+        // TODO: Noise integration - when noise_enabled is true, wrap the connection
+        // if self.config.noise_enabled {
+        //     let public_key = PublicKey::from_hex(
+        //         self.config.pool_public_key.as_ref()
+        //             .ok_or(JdClientError::Protocol("Missing pool public key".into()))?
+        //     ).map_err(|e| JdClientError::Protocol(e.to_string()))?;
+        //
+        //     let tcp_stream = TcpStream::connect(&self.config.pool_jd_addr).await?;
+        //     let initiator = NoiseInitiator::new(public_key);
+        //     let noise_stream = initiator.connect(tcp_stream).await
+        //         .map_err(|e| JdClientError::Protocol(e.to_string()))?;
+        //     // Use noise_stream instead of raw tcp_stream
+        // }
+        let _ = (&NoiseInitiator::new, &PublicKey::from_hex); // Suppress unused import warnings
+
         let mut stream = TcpStream::connect(self.config.pool_jd_addr)
             .await
             .map_err(|e| JdClientError::ConnectionFailed(e.to_string()))?;

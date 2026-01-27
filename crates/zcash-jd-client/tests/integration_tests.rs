@@ -16,6 +16,9 @@ fn test_client_config_defaults() {
     assert_eq!(config.user_identifier, "zcash-jd-client");
     assert_eq!(config.template_poll_ms, 1000);
     assert!(config.miner_payout_address.is_none());
+    // Noise is disabled by default
+    assert!(!config.noise_enabled);
+    assert!(config.pool_public_key.is_none());
 }
 
 #[test]
@@ -26,6 +29,8 @@ fn test_client_config_custom() {
         user_identifier: "my-miner".to_string(),
         template_poll_ms: 500,
         miner_payout_address: Some("t1abc123...".to_string()),
+        noise_enabled: true,
+        pool_public_key: Some("abc123".to_string()),
     };
 
     assert_eq!(config.zebra_url, "http://192.168.1.100:8232");
@@ -33,6 +38,8 @@ fn test_client_config_custom() {
     assert_eq!(config.user_identifier, "my-miner");
     assert_eq!(config.template_poll_ms, 500);
     assert_eq!(config.miner_payout_address, Some("t1abc123...".to_string()));
+    assert!(config.noise_enabled);
+    assert_eq!(config.pool_public_key, Some("abc123".to_string()));
 }
 
 #[test]

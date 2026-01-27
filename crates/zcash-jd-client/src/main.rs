@@ -27,6 +27,14 @@ struct Args {
     /// Optional miner payout address
     #[arg(long)]
     payout_address: Option<String>,
+
+    /// Enable Noise encryption
+    #[arg(long)]
+    noise: bool,
+
+    /// Pool's Noise public key (hex-encoded)
+    #[arg(long)]
+    pool_public_key: Option<String>,
 }
 
 #[tokio::main]
@@ -41,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_identifier: args.user_id,
         template_poll_ms: args.poll_interval,
         miner_payout_address: args.payout_address,
+        noise_enabled: args.noise,
+        pool_public_key: args.pool_public_key,
     };
 
     info!("=== Zcash JD Client ===");
@@ -48,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Pool JD Server: {}", config.pool_jd_addr);
     info!("User ID: {}", config.user_identifier);
     info!("Poll interval: {}ms", config.template_poll_ms);
+    info!("Noise encryption: {}", if config.noise_enabled { "enabled" } else { "disabled" });
 
     let client = JdClient::new(config)?;
     client.run().await?;

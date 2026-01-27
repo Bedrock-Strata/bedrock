@@ -9,6 +9,10 @@ pub struct JdClientConfig {
     pub user_identifier: String,
     pub template_poll_ms: u64,
     pub miner_payout_address: Option<String>,
+    /// Enable Noise encryption
+    pub noise_enabled: bool,
+    /// Pool's Noise public key (hex-encoded, required if noise_enabled)
+    pub pool_public_key: Option<String>,
 }
 
 impl Default for JdClientConfig {
@@ -19,6 +23,8 @@ impl Default for JdClientConfig {
             user_identifier: "zcash-jd-client".to_string(),
             template_poll_ms: 1000,
             miner_payout_address: None,
+            noise_enabled: false,
+            pool_public_key: None,
         }
     }
 }

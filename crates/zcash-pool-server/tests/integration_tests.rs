@@ -50,6 +50,9 @@ fn test_config_defaults() {
     assert_eq!(config.initial_difficulty, 1.0);
     assert_eq!(config.target_shares_per_minute, 5.0);
     assert_eq!(config.max_connections, 10000);
+    // JD Server disabled by default
+    assert!(config.jd_listen_addr.is_none());
+    assert!(config.pool_payout_script.is_none());
 }
 
 #[test]
@@ -63,11 +66,15 @@ fn test_config_custom() {
         initial_difficulty: 100.0,
         target_shares_per_minute: 10.0,
         max_connections: 5000,
+        jd_listen_addr: Some("0.0.0.0:3334".parse().unwrap()),
+        pool_payout_script: Some(vec![0x76, 0xa9, 0x14]),
     };
 
     assert_eq!(config.listen_addr.port(), 4444);
     assert_eq!(config.nonce_1_len, 8);
     assert_eq!(config.initial_difficulty, 100.0);
+    assert!(config.jd_listen_addr.is_some());
+    assert!(config.pool_payout_script.is_some());
 }
 
 // =============================================================================

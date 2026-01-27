@@ -27,9 +27,6 @@ pub enum JdServerError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
-
-    #[error("Pool error: {0}")]
-    Pool(#[from] zcash_pool_server::PoolError),
 }
 
 pub type Result<T> = std::result::Result<T, JdServerError>;

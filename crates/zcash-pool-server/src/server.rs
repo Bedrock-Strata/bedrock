@@ -21,6 +21,7 @@ use crate::payout::{MinerId, PayoutTracker};
 use crate::session::{ServerMessage, Session, SessionMessage};
 use crate::share::ShareProcessor;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +29,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use zcash_equihash_validator::VardiffConfig;
-use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
+use zcash_jd_server::{handle_jd_client, JdServer, JdServerConfig};
 use zcash_template_provider::types::BlockTemplate;
+use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
 
 /// Main pool server
 pub struct PoolServer {
@@ -55,6 +57,10 @@ pub struct PoolServer {
     next_channel_id: AtomicU32,
     /// Current block target (for checking block finds)
     current_block_target: Arc<RwLock<[u8; 32]>>,
+    /// JD Server (embedded, optional)
+    jd_server: Arc<JdServer>,
+    /// JD Server listen address (None = disabled)
+    jd_listen_addr: Option<SocketAddr>,
 }
 
 impl PoolServer {
@@ -71,18 +77,32 @@ impl PoolServer {
         // Create session channel (buffered to handle bursts)
         let (session_tx, session_rx) = mpsc::channel(10000);
 
+        // Create payout tracker (shared with JD server)
+        let payout_tracker = Arc::new(PayoutTracker::default());
+
+        // Create JD Server with shared payout tracker
+        let jd_config = JdServerConfig {
+            pool_payout_script: config.pool_payout_script.clone().unwrap_or_default(),
+            ..JdServerConfig::default()
+        };
+        let jd_server = Arc::new(JdServer::new(jd_config, Arc::clone(&payout_tracker)));
+
+        let jd_listen_addr = config.jd_listen_addr;
+
         Ok(Self {
             config,
             template_provider: Arc::new(template_provider),
             job_distributor: Arc::new(RwLock::new(JobDistributor::new())),
             share_processor: Arc::new(ShareProcessor::new()),
             duplicate_detector: Arc::new(InMemoryDuplicateDetector::new()),
-            payout_tracker: Arc::new(PayoutTracker::default()),
+            payout_tracker,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             session_tx,
             session_rx,
             next_channel_id: AtomicU32::new(1),
             current_block_target: Arc::new(RwLock::new([0xff; 32])),
+            jd_server,
+            jd_listen_addr,
         })
     }
 
@@ -91,6 +111,16 @@ impl PoolServer {
         // Bind to listen address
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!("Pool server listening on {}", self.config.listen_addr);
+
+        // Optionally bind JD listener
+        let jd_listener = if let Some(addr) = self.jd_listen_addr {
+            let listener = TcpListener::bind(addr).await?;
+            info!("JD Server listening on {}", addr);
+            Some(listener)
+        } else {
+            info!("JD Server disabled (no jd_listen_addr configured)");
+            None
+        };
 
         // Subscribe to template updates
         let mut template_rx = self.template_provider.subscribe();
@@ -123,7 +153,7 @@ impl PoolServer {
         // Main event loop
         loop {
             tokio::select! {
-                // Accept new connections
+                // Accept new miner connections
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, addr)) => {
@@ -143,6 +173,27 @@ impl PoolServer {
                         Err(e) => {
                             error!("Accept error: {}", e);
                         }
+                    }
+                }
+
+                // Accept JD client connections (if JD server is enabled)
+                jd_accept_result = async {
+                    if let Some(ref listener) = jd_listener {
+                        listener.accept().await
+                    } else {
+                        // If JD is disabled, this branch never completes
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Ok((stream, addr)) = jd_accept_result {
+                        info!("New JD client from {}", addr);
+                        let jd_server = Arc::clone(&self.jd_server);
+                        let client_id = format!("jd_{}", addr);
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_jd_client(stream, jd_server, client_id).await {
+                                warn!("JD client error: {}", e);
+                            }
+                        });
                     }
                 }
 
@@ -253,6 +304,11 @@ impl PoolServer {
             let mut target = self.current_block_target.write().await;
             *target = template.target.0;
         }
+
+        // Update JD Server's current prev_hash (for stale detection)
+        self.jd_server
+            .set_current_prev_hash(template.header.prev_hash.0)
+            .await;
 
         // Update job distributor
         let is_new_block = {

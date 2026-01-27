@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 use zcash_mining_protocol::codec::MessageFrame;
-use zcash_pool_server::PayoutTracker;
+use zcash_pool_common::PayoutTracker;
 
 /// JD Server embedded in pool
 ///

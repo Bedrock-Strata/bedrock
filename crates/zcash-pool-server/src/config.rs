@@ -28,6 +28,12 @@ pub struct PoolConfig {
 
     /// Maximum concurrent connections
     pub max_connections: usize,
+
+    /// Optional: JD Server listen address (enables Job Declaration support)
+    pub jd_listen_addr: Option<SocketAddr>,
+
+    /// Pool's payout script for coinbase (used by JD Server)
+    pub pool_payout_script: Option<Vec<u8>>,
 }
 
 impl Default for PoolConfig {
@@ -41,6 +47,8 @@ impl Default for PoolConfig {
             initial_difficulty: 1.0,
             target_shares_per_minute: 5.0,
             max_connections: 10000,
+            jd_listen_addr: None, // Disabled by default
+            pool_payout_script: None,
         }
     }
 }

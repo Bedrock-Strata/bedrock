@@ -1,0 +1,8 @@
+[package]
+name = "zcash-pool-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Common types shared between pool server components"
+
+[dependencies]

@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use tracing::info;
-use zcash_jd_client::{JdClient, JdClientConfig};
+use zcash_jd_client::{config::TxSelectionStrategy, JdClient, JdClientConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "zcash-jd-client")]
@@ -35,6 +35,14 @@ struct Args {
     /// Pool's Noise public key (hex-encoded)
     #[arg(long)]
     pool_public_key: Option<String>,
+
+    /// Use Full-Template mode for transaction selection
+    #[arg(long)]
+    full_template: bool,
+
+    /// Transaction selection strategy (all, by-fee-rate)
+    #[arg(long, default_value = "all")]
+    tx_selection: String,
 }
 
 #[tokio::main]
@@ -51,6 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         miner_payout_address: args.payout_address,
         noise_enabled: args.noise,
         pool_public_key: args.pool_public_key,
+        full_template_mode: args.full_template,
+        tx_selection: TxSelectionStrategy::from_str(&args.tx_selection)
+            .unwrap_or(TxSelectionStrategy::All),
     };
 
     info!("=== Zcash JD Client ===");
@@ -59,6 +70,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("User ID: {}", config.user_identifier);
     info!("Poll interval: {}ms", config.template_poll_ms);
     info!("Noise encryption: {}", if config.noise_enabled { "enabled" } else { "disabled" });
+    if config.full_template_mode {
+        info!("Full-Template mode: enabled (tx selection: {})", config.tx_selection);
+    } else {
+        info!("Full-Template mode: disabled (using Coinbase-Only)");
+    }
 
     let client = JdClient::new(config)?;
     client.run().await?;

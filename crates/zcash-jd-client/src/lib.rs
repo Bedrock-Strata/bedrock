@@ -14,6 +14,6 @@ pub mod template_builder;
 
 pub use block_submitter::BlockSubmitter;
 pub use client::JdClient;
-pub use config::JdClientConfig;
+pub use config::{JdClientConfig, TxSelectionStrategy};
 pub use error::JdClientError;
 pub use template_builder::TemplateBuilder;

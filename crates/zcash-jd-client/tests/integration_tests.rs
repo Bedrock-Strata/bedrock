@@ -6,7 +6,7 @@
 //! - Block hex construction
 //! - Error type handling
 
-use zcash_jd_client::{BlockSubmitter, JdClientConfig, JdClientError, TemplateBuilder};
+use zcash_jd_client::{BlockSubmitter, JdClientConfig, JdClientError, TemplateBuilder, TxSelectionStrategy};
 
 #[test]
 fn test_client_config_defaults() {
@@ -19,6 +19,9 @@ fn test_client_config_defaults() {
     // Noise is disabled by default
     assert!(!config.noise_enabled);
     assert!(config.pool_public_key.is_none());
+    // Full-Template mode is disabled by default
+    assert!(!config.full_template_mode);
+    assert_eq!(config.tx_selection, TxSelectionStrategy::All);
 }
 
 #[test]
@@ -31,6 +34,8 @@ fn test_client_config_custom() {
         miner_payout_address: Some("t1abc123...".to_string()),
         noise_enabled: true,
         pool_public_key: Some("abc123".to_string()),
+        full_template_mode: true,
+        tx_selection: TxSelectionStrategy::ByFeeRate,
     };
 
     assert_eq!(config.zebra_url, "http://192.168.1.100:8232");
@@ -40,6 +45,8 @@ fn test_client_config_custom() {
     assert_eq!(config.miner_payout_address, Some("t1abc123...".to_string()));
     assert!(config.noise_enabled);
     assert_eq!(config.pool_public_key, Some("abc123".to_string()));
+    assert!(config.full_template_mode);
+    assert_eq!(config.tx_selection, TxSelectionStrategy::ByFeeRate);
 }
 
 #[test]
@@ -192,6 +199,39 @@ fn test_config_socket_addr() {
     };
     assert!(custom_config.pool_jd_addr.ip().is_unspecified());
     assert_eq!(custom_config.pool_jd_addr.port(), 4444);
+}
+
+#[test]
+fn test_tx_selection_strategy_from_str() {
+    // Test valid inputs
+    assert_eq!(TxSelectionStrategy::from_str("all"), Some(TxSelectionStrategy::All));
+    assert_eq!(TxSelectionStrategy::from_str("ALL"), Some(TxSelectionStrategy::All));
+    assert_eq!(TxSelectionStrategy::from_str("by-fee-rate"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::from_str("BY-FEE-RATE"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::from_str("byfee"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::from_str("fee"), Some(TxSelectionStrategy::ByFeeRate));
+
+    // Test invalid inputs
+    assert_eq!(TxSelectionStrategy::from_str("invalid"), None);
+    assert_eq!(TxSelectionStrategy::from_str(""), None);
+}
+
+#[test]
+fn test_tx_selection_strategy_as_str() {
+    assert_eq!(TxSelectionStrategy::All.as_str(), "all");
+    assert_eq!(TxSelectionStrategy::ByFeeRate.as_str(), "by-fee-rate");
+}
+
+#[test]
+fn test_tx_selection_strategy_display() {
+    assert_eq!(format!("{}", TxSelectionStrategy::All), "all");
+    assert_eq!(format!("{}", TxSelectionStrategy::ByFeeRate), "by-fee-rate");
+}
+
+#[test]
+fn test_tx_selection_strategy_default() {
+    let default = TxSelectionStrategy::default();
+    assert_eq!(default, TxSelectionStrategy::All);
 }
 
 #[test]

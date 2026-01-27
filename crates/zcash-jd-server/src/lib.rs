@@ -41,4 +41,4 @@ pub use error::{JdServerError, Result};
 pub use messages::*;
 pub use server::{handle_jd_client, JdServer};
 pub use token::{DeclaredJobInfo, MiningJobToken, TokenManager};
-pub use validation::{ValidationLevel, ValidationResult};
+pub use validation::{TemplateValidator, ValidationLevel, ValidationResult};

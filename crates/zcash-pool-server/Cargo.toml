@@ -1,0 +1,22 @@
+[package]
+name = "zcash-pool-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stratum V2 pool server for Zcash Equihash mining"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+rustc-hash = "2.0"
+
+# Local dependencies
+zcash-template-provider = { path = "../zcash-template-provider" }
+zcash-mining-protocol = { path = "../zcash-mining-protocol" }
+zcash-equihash-validator = { path = "../zcash-equihash-validator" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true

@@ -7,6 +7,7 @@
 //! - Tracks contributions for PPS payout
 
 pub mod config;
+pub mod duplicate;
 pub mod error;
 
 // TODO: These modules will be implemented in subsequent tasks
@@ -15,9 +16,9 @@ pub mod error;
 // pub mod channel;
 // pub mod job;
 // pub mod share;
-// pub mod duplicate;
 // pub mod payout;
 
 pub use config::PoolConfig;
+pub use duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 pub use error::PoolError;
 // pub use server::PoolServer;

@@ -12,6 +12,7 @@ tracing.workspace = true
 serde.workspace = true
 byteorder.workspace = true
 hex.workspace = true
+sha2.workspace = true
 
 # Local dependencies
 zcash-mining-protocol = { path = "../zcash-mining-protocol" }

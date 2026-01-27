@@ -9,6 +9,7 @@ use crate::config::JdClientConfig;
 use crate::error::{JdClientError, Result};
 use crate::full_template::FullTemplateBuilder;
 use crate::template_builder::TemplateBuilder;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -38,6 +39,8 @@ pub struct JdClient {
     current_token: Arc<RwLock<Option<Vec<u8>>>>,
     /// Current job ID assigned by the pool
     current_job_id: Arc<RwLock<Option<u32>>>,
+    /// Transaction data cache for Full-Template mode (txid -> raw tx)
+    tx_cache: Arc<RwLock<HashMap<[u8; 32], Vec<u8>>>>,
 }
 
 impl JdClient {
@@ -69,6 +72,7 @@ impl JdClient {
             template_provider: Arc::new(template_provider),
             current_token: Arc::new(RwLock::new(None)),
             current_job_id: Arc::new(RwLock::new(None)),
+            tx_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -313,6 +317,70 @@ impl JdClient {
     pub async fn current_template(&self) -> Option<BlockTemplate> {
         self.template_provider.get_current_template().await
     }
+
+    /// Add a transaction to the cache for Full-Template mode
+    ///
+    /// The cache stores raw transaction data keyed by txid, allowing the client
+    /// to respond to GetMissingTransactions requests from the server.
+    pub async fn cache_transaction(&self, txid: [u8; 32], data: Vec<u8>) {
+        let mut cache = self.tx_cache.write().await;
+        cache.insert(txid, data);
+    }
+
+    /// Add multiple transactions to the cache
+    pub async fn cache_transactions(&self, transactions: impl IntoIterator<Item = ([u8; 32], Vec<u8>)>) {
+        let mut cache = self.tx_cache.write().await;
+        for (txid, data) in transactions {
+            cache.insert(txid, data);
+        }
+    }
+
+    /// Get a transaction from the cache
+    pub async fn get_cached_transaction(&self, txid: &[u8; 32]) -> Option<Vec<u8>> {
+        let cache = self.tx_cache.read().await;
+        cache.get(txid).cloned()
+    }
+
+    /// Clear the transaction cache
+    pub async fn clear_tx_cache(&self) {
+        let mut cache = self.tx_cache.write().await;
+        cache.clear();
+    }
+
+    /// Get the number of cached transactions
+    pub async fn tx_cache_size(&self) -> usize {
+        let cache = self.tx_cache.read().await;
+        cache.len()
+    }
+
+    /// Handle GetMissingTransactions request from the server
+    ///
+    /// This method looks up the requested transaction IDs in the local cache
+    /// and returns a ProvideMissingTransactions response with the available data.
+    pub async fn handle_get_missing_transactions(
+        &self,
+        msg: GetMissingTransactions,
+    ) -> ProvideMissingTransactions {
+        let cache = self.tx_cache.read().await;
+
+        let transactions: Vec<Vec<u8>> = msg
+            .missing_tx_ids
+            .iter()
+            .filter_map(|txid| cache.get(txid).cloned())
+            .collect();
+
+        debug!(
+            "Responding to GetMissingTransactions: requested {} txids, found {} in cache",
+            msg.missing_tx_ids.len(),
+            transactions.len()
+        );
+
+        ProvideMissingTransactions {
+            channel_id: msg.channel_id,
+            request_id: msg.request_id,
+            transactions,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +456,184 @@ mod tests {
         assert!(client.is_full_template_mode());
         let builder = client.full_template_builder().unwrap();
         assert_eq!(builder.strategy(), TxSelectionStrategy::ByFeeRate);
+    }
+
+    // =========================================================================
+    // Transaction Cache Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_tx_cache_basic_operations() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Cache should start empty
+        assert_eq!(client.tx_cache_size().await, 0);
+
+        // Add a transaction
+        let txid = [0x11; 32];
+        let tx_data = vec![0x01, 0x00, 0x00, 0x00];
+        client.cache_transaction(txid, tx_data.clone()).await;
+
+        // Should be cached
+        assert_eq!(client.tx_cache_size().await, 1);
+        let cached = client.get_cached_transaction(&txid).await;
+        assert_eq!(cached, Some(tx_data));
+
+        // Unknown txid should return None
+        let unknown_txid = [0x22; 32];
+        assert!(client.get_cached_transaction(&unknown_txid).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tx_cache_multiple_transactions() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Add multiple transactions at once
+        let transactions = vec![
+            ([0x11; 32], vec![0x01, 0x00]),
+            ([0x22; 32], vec![0x02, 0x00]),
+            ([0x33; 32], vec![0x03, 0x00]),
+        ];
+        client.cache_transactions(transactions.clone()).await;
+
+        assert_eq!(client.tx_cache_size().await, 3);
+        for (txid, data) in transactions {
+            assert_eq!(client.get_cached_transaction(&txid).await, Some(data));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tx_cache_clear() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Add some transactions
+        client.cache_transaction([0x11; 32], vec![0x01]).await;
+        client.cache_transaction([0x22; 32], vec![0x02]).await;
+        assert_eq!(client.tx_cache_size().await, 2);
+
+        // Clear the cache
+        client.clear_tx_cache().await;
+        assert_eq!(client.tx_cache_size().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_tx_cache_overwrite() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        let txid = [0x11; 32];
+        client.cache_transaction(txid, vec![0x01, 0x00]).await;
+        client.cache_transaction(txid, vec![0x02, 0x00]).await;
+
+        // Should have overwritten with new data
+        assert_eq!(client.tx_cache_size().await, 1);
+        assert_eq!(
+            client.get_cached_transaction(&txid).await,
+            Some(vec![0x02, 0x00])
+        );
+    }
+
+    // =========================================================================
+    // GetMissingTransactions Handler Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_handle_get_missing_transactions_all_found() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Pre-cache some transactions
+        let txid1 = [0x11; 32];
+        let txid2 = [0x22; 32];
+        let tx_data1 = vec![0x01, 0x00, 0x00, 0x00];
+        let tx_data2 = vec![0x02, 0x00, 0x00, 0x00];
+        client.cache_transaction(txid1, tx_data1.clone()).await;
+        client.cache_transaction(txid2, tx_data2.clone()).await;
+
+        // Request both transactions
+        let request = GetMissingTransactions {
+            channel_id: 1,
+            request_id: 42,
+            missing_tx_ids: vec![txid1, txid2],
+        };
+
+        let response = client.handle_get_missing_transactions(request).await;
+
+        assert_eq!(response.channel_id, 1);
+        assert_eq!(response.request_id, 42);
+        assert_eq!(response.transactions.len(), 2);
+        assert!(response.transactions.contains(&tx_data1));
+        assert!(response.transactions.contains(&tx_data2));
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_missing_transactions_partial_found() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Only cache one transaction
+        let txid1 = [0x11; 32];
+        let txid2 = [0x22; 32];
+        let tx_data1 = vec![0x01, 0x00, 0x00, 0x00];
+        client.cache_transaction(txid1, tx_data1.clone()).await;
+
+        // Request both transactions (one missing)
+        let request = GetMissingTransactions {
+            channel_id: 1,
+            request_id: 42,
+            missing_tx_ids: vec![txid1, txid2],
+        };
+
+        let response = client.handle_get_missing_transactions(request).await;
+
+        assert_eq!(response.channel_id, 1);
+        assert_eq!(response.request_id, 42);
+        // Only one transaction found
+        assert_eq!(response.transactions.len(), 1);
+        assert_eq!(response.transactions[0], tx_data1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_missing_transactions_none_found() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Don't cache anything
+
+        // Request transactions
+        let request = GetMissingTransactions {
+            channel_id: 1,
+            request_id: 42,
+            missing_tx_ids: vec![[0x11; 32], [0x22; 32]],
+        };
+
+        let response = client.handle_get_missing_transactions(request).await;
+
+        assert_eq!(response.channel_id, 1);
+        assert_eq!(response.request_id, 42);
+        // No transactions found
+        assert_eq!(response.transactions.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_missing_transactions_empty_request() {
+        let config = JdClientConfig::default();
+        let client = JdClient::new(config).unwrap();
+
+        // Empty request
+        let request = GetMissingTransactions {
+            channel_id: 1,
+            request_id: 42,
+            missing_tx_ids: vec![],
+        };
+
+        let response = client.handle_get_missing_transactions(request).await;
+
+        assert_eq!(response.channel_id, 1);
+        assert_eq!(response.request_id, 42);
+        assert_eq!(response.transactions.len(), 0);
     }
 }

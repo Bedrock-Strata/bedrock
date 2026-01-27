@@ -2588,6 +2588,7 @@ dependencies = [
  "zcash-equihash-validator",
  "zcash-jd-server",
  "zcash-mining-protocol",
+ "zcash-stratum-noise",
  "zcash-template-provider",
 ]
 
@@ -2598,6 +2599,7 @@ dependencies = [
  "byteorder",
  "hex",
  "serde",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",

@@ -14,6 +14,7 @@
 
 use crate::channel::Channel;
 use crate::config::PoolConfig;
+use crate::fiber::FiberRelay;
 use crate::duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 use crate::error::{PoolError, Result};
 use crate::job::JobDistributor;
@@ -70,6 +71,8 @@ pub struct PoolServer {
     noise_responder: Option<Arc<NoiseResponder>>,
     /// Pool metrics
     metrics: Arc<PoolMetrics>,
+    /// Fiber relay for compact block propagation (optional)
+    fiber_relay: Option<Arc<FiberRelay>>,
 }
 
 impl PoolServer {
@@ -85,6 +88,23 @@ impl PoolServer {
 
         // Create metrics
         let metrics = Arc::new(PoolMetrics::new());
+
+        // Create fiber relay if enabled
+        let fiber_relay = if config.fiber_relay_enabled {
+            match FiberRelay::new(&config) {
+                Ok(relay) => {
+                    info!("Fiber relay initialized");
+                    Some(Arc::new(relay))
+                }
+                Err(e) => {
+                    warn!("Failed to create fiber relay: {}. Continuing without relay.", e);
+                    None
+                }
+            }
+        } else {
+            info!("Fiber relay disabled");
+            None
+        };
 
         // Create template provider
         let tp_config = TemplateProviderConfig {
@@ -152,6 +172,7 @@ impl PoolServer {
             jd_listen_addr,
             noise_responder,
             metrics,
+            fiber_relay,
         })
     }
 

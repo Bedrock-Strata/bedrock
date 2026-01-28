@@ -78,6 +78,120 @@ pub struct PoolConfig {
     pub fiber_parity_shards: usize,
 }
 
+/// Configuration validation errors
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigError {
+    /// Invalid nonce_1_len (must be 1-31 to leave room for nonce_2)
+    InvalidNonce1Len(u8),
+    /// Invalid difficulty (must be positive)
+    InvalidDifficulty(f64),
+    /// Invalid target shares per minute (must be positive)
+    InvalidTargetSharesPerMinute(f64),
+    /// Invalid validation threads (must be at least 1)
+    InvalidValidationThreads(usize),
+    /// Invalid template poll interval (must be at least 100ms)
+    InvalidTemplatePollMs(u64),
+    /// Invalid max connections (must be at least 1)
+    InvalidMaxConnections(usize),
+    /// Fiber relay enabled but no auth key provided
+    FiberMissingAuthKey,
+    /// Invalid FEC shard configuration
+    InvalidFecConfig { data: usize, parity: usize },
+    /// JD enabled but no pool payout script
+    JdMissingPayoutScript,
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::InvalidNonce1Len(v) => write!(f, "nonce_1_len {} must be 1-31", v),
+            ConfigError::InvalidDifficulty(v) => write!(f, "initial_difficulty {} must be positive", v),
+            ConfigError::InvalidTargetSharesPerMinute(v) => {
+                write!(f, "target_shares_per_minute {} must be positive", v)
+            }
+            ConfigError::InvalidValidationThreads(v) => {
+                write!(f, "validation_threads {} must be at least 1", v)
+            }
+            ConfigError::InvalidTemplatePollMs(v) => {
+                write!(f, "template_poll_ms {} must be at least 100", v)
+            }
+            ConfigError::InvalidMaxConnections(v) => {
+                write!(f, "max_connections {} must be at least 1", v)
+            }
+            ConfigError::FiberMissingAuthKey => {
+                write!(f, "fiber_relay_enabled requires fiber_auth_key")
+            }
+            ConfigError::InvalidFecConfig { data, parity } => {
+                write!(f, "FEC config invalid: data={}, parity={} (both must be >= 1)", data, parity)
+            }
+            ConfigError::JdMissingPayoutScript => {
+                write!(f, "jd_listen_addr set but pool_payout_script is missing")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl PoolConfig {
+    /// Validate the configuration and return any errors
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // nonce_1_len must leave room for at least 1 byte of nonce_2
+        if self.nonce_1_len == 0 || self.nonce_1_len > 31 {
+            return Err(ConfigError::InvalidNonce1Len(self.nonce_1_len));
+        }
+
+        // Difficulty must be positive
+        if self.initial_difficulty <= 0.0 || !self.initial_difficulty.is_finite() {
+            return Err(ConfigError::InvalidDifficulty(self.initial_difficulty));
+        }
+
+        // Target shares per minute must be positive
+        if self.target_shares_per_minute <= 0.0 || !self.target_shares_per_minute.is_finite() {
+            return Err(ConfigError::InvalidTargetSharesPerMinute(
+                self.target_shares_per_minute,
+            ));
+        }
+
+        // Need at least 1 validation thread
+        if self.validation_threads == 0 {
+            return Err(ConfigError::InvalidValidationThreads(self.validation_threads));
+        }
+
+        // Template poll interval should be at least 100ms to avoid hammering Zebra
+        if self.template_poll_ms < 100 {
+            return Err(ConfigError::InvalidTemplatePollMs(self.template_poll_ms));
+        }
+
+        // Need at least 1 connection
+        if self.max_connections == 0 {
+            return Err(ConfigError::InvalidMaxConnections(self.max_connections));
+        }
+
+        // Fiber relay requires auth key
+        if self.fiber_relay_enabled && self.fiber_auth_key.is_none() {
+            return Err(ConfigError::FiberMissingAuthKey);
+        }
+
+        // FEC shards must be valid
+        if self.fiber_relay_enabled
+            && (self.fiber_data_shards == 0 || self.fiber_parity_shards == 0)
+        {
+            return Err(ConfigError::InvalidFecConfig {
+                data: self.fiber_data_shards,
+                parity: self.fiber_parity_shards,
+            });
+        }
+
+        // JD requires payout script
+        if self.jd_listen_addr.is_some() && self.pool_payout_script.is_none() {
+            return Err(ConfigError::JdMissingPayoutScript);
+        }
+
+        Ok(())
+    }
+}
+
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {

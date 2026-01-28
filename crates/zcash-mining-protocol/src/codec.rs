@@ -142,6 +142,13 @@ pub fn decode_new_equihash_job(data: &[u8]) -> Result<NewEquihashJob> {
     let nonce_1_len = cursor.read_u8().map_err(|e| {
         ProtocolError::EncodingError(e.to_string())
     })? as usize;
+    // Validate nonce_1_len (Zcash nonce is 32 bytes total)
+    if nonce_1_len > 32 {
+        return Err(ProtocolError::EncodingError(format!(
+            "nonce_1_len {} exceeds maximum of 32",
+            nonce_1_len
+        )));
+    }
     let mut nonce_1 = vec![0u8; nonce_1_len];
     cursor.read_exact(&mut nonce_1).map_err(|e| {
         ProtocolError::EncodingError(e.to_string())
@@ -150,6 +157,19 @@ pub fn decode_new_equihash_job(data: &[u8]) -> Result<NewEquihashJob> {
     let nonce_2_len = cursor.read_u8().map_err(|e| {
         ProtocolError::EncodingError(e.to_string())
     })?;
+    // Validate nonce_2_len and that nonce_1 + nonce_2 == 32 bytes
+    if nonce_2_len as usize > 32 {
+        return Err(ProtocolError::EncodingError(format!(
+            "nonce_2_len {} exceeds maximum of 32",
+            nonce_2_len
+        )));
+    }
+    if nonce_1_len + nonce_2_len as usize != 32 {
+        return Err(ProtocolError::EncodingError(format!(
+            "nonce_1_len ({}) + nonce_2_len ({}) must equal 32",
+            nonce_1_len, nonce_2_len
+        )));
+    }
 
     let time = cursor.read_u32::<LittleEndian>().map_err(|e| {
         ProtocolError::EncodingError(e.to_string())
@@ -242,6 +262,13 @@ pub fn decode_submit_share(data: &[u8]) -> Result<SubmitEquihashShare> {
     let nonce_2_len = cursor.read_u8().map_err(|e| {
         ProtocolError::EncodingError(e.to_string())
     })? as usize;
+    // Validate nonce_2_len (Zcash nonce is 32 bytes total)
+    if nonce_2_len > 32 {
+        return Err(ProtocolError::EncodingError(format!(
+            "nonce_2_len {} exceeds maximum of 32",
+            nonce_2_len
+        )));
+    }
     let mut nonce_2 = vec![0u8; nonce_2_len];
     cursor.read_exact(&mut nonce_2).map_err(|e| {
         ProtocolError::EncodingError(e.to_string())

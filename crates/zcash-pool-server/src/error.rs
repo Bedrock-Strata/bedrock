@@ -36,6 +36,9 @@ pub enum PoolError {
     #[error("Channel send error")]
     ChannelSend,
 
+    #[error("Operation timed out")]
+    Timeout,
+
     #[error("Template provider error: {0}")]
     TemplateProvider(String),
 

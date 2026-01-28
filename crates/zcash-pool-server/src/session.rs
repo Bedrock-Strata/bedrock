@@ -9,6 +9,7 @@
 use crate::error::{PoolError, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write as StdWrite;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -267,6 +268,9 @@ impl Session {
         Ok(())
     }
 
+    /// Timeout for share validation response (30 seconds)
+    const SHARE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// Handle a share submission
     async fn handle_share(&mut self, share: SubmitEquihashShare) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -282,10 +286,20 @@ impl Session {
             .await
             .map_err(|_| PoolError::ChannelSend)?;
 
-        // Wait for validation result
-        let result = response_rx
-            .await
-            .map_err(|_| PoolError::ChannelSend)?;
+        // Wait for validation result with timeout
+        let result = match tokio::time::timeout(Self::SHARE_VALIDATION_TIMEOUT, response_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                // Channel was dropped - validation failed
+                warn!("Share validation channel dropped for seq {}", sequence_number);
+                return Err(PoolError::ChannelSend);
+            }
+            Err(_) => {
+                // Timeout - validation took too long
+                warn!("Share validation timeout for seq {}", sequence_number);
+                return Err(PoolError::Timeout);
+            }
+        };
 
         // Send response to miner
         self.send_response(sequence_number, result).await

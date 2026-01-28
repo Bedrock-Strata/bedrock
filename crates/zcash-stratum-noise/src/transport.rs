@@ -59,7 +59,8 @@ impl NoiseStream<TcpStream> {
         // Decrypt
         let mut plaintext = vec![0u8; len];
         let plaintext_len = {
-            let mut transport = self.transport.lock().unwrap();
+            // Handle lock poisoning gracefully - continue operating even if another thread panicked
+            let mut transport = self.transport.lock().unwrap_or_else(|e| e.into_inner());
             transport
                 .read_message(&ciphertext, &mut plaintext)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
@@ -82,7 +83,8 @@ impl NoiseStream<TcpStream> {
         // Encrypt
         let mut ciphertext = vec![0u8; plaintext.len() + 16]; // AEAD tag
         let ciphertext_len = {
-            let mut transport = self.transport.lock().unwrap();
+            // Handle lock poisoning gracefully - continue operating even if another thread panicked
+            let mut transport = self.transport.lock().unwrap_or_else(|e| e.into_inner());
             transport
                 .write_message(plaintext, &mut ciphertext)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?

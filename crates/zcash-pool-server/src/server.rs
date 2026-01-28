@@ -25,6 +25,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::signal;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use zcash_equihash_validator::VardiffConfig;
@@ -338,6 +339,27 @@ impl PoolServer {
                     if let Err(e) = self.handle_session_message(msg).await {
                         error!("Error handling session message: {}", e);
                     }
+                }
+
+                // Handle graceful shutdown
+                _ = signal::ctrl_c() => {
+                    info!("Shutdown signal received, closing connections gracefully...");
+
+                    // Notify all sessions to shut down
+                    let sessions = self.sessions.read().await;
+                    let session_count = sessions.len();
+                    for (channel_id, sender) in sessions.iter() {
+                        if sender.send(ServerMessage::Shutdown).await.is_err() {
+                            debug!("Session {} already closed", channel_id);
+                        }
+                    }
+                    drop(sessions);
+
+                    // Give sessions a moment to close gracefully
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+
+                    info!("Graceful shutdown complete ({} sessions closed)", session_count);
+                    return Ok(());
                 }
             }
         }

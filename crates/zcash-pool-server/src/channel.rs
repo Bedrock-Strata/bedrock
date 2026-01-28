@@ -8,7 +8,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Global channel ID counter
+/// Starts at 1, wraps at u32::MAX - 1 to avoid 0 (reserved for errors)
 static NEXT_CHANNEL_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Maximum channel ID before wrapping (reserve 0 and u32::MAX)
+const MAX_CHANNEL_ID: u32 = u32::MAX - 1;
 
 /// Standard Channel state for a single miner
 #[derive(Debug)]
@@ -42,8 +46,26 @@ impl Channel {
     /// Reserve and return the next channel id.
     ///
     /// Used to generate nonce_1 that matches the channel's id.
+    /// Handles wraparound safely by resetting to 1 when approaching MAX.
     pub fn next_id() -> u32 {
-        NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst)
+        loop {
+            let current = NEXT_CHANNEL_ID.load(Ordering::SeqCst);
+            let next = if current >= MAX_CHANNEL_ID {
+                // Wrap around to 1 (0 is reserved)
+                1
+            } else {
+                current + 1
+            };
+
+            // Try to atomically update; if another thread beat us, retry
+            if NEXT_CHANNEL_ID
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return current;
+            }
+            // Another thread updated it, retry
+        }
     }
 
     /// Create a new channel with a pre-reserved id and nonce_1 prefix.

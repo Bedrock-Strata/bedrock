@@ -70,15 +70,30 @@ impl TokenManager {
         self.allocate_token_with_mode(client_id, JobDeclarationMode::CoinbaseOnly)
     }
 
+    /// Maximum total tokens across all clients to prevent memory exhaustion
+    const MAX_TOTAL_TOKENS: usize = 100_000;
+
     /// Allocate a new token for a client with a specific mode
     pub fn allocate_token_with_mode(
         &self,
         client_id: &str,
         granted_mode: JobDeclarationMode,
     ) -> Result<MiningJobToken> {
-        // Check rate limit: max tokens per client
+        // Cleanup expired tokens first to free up capacity
+        self.cleanup_expired();
+
+        // Check rate limits
         {
             let tokens = self.tokens.read().unwrap_or_else(|e| e.into_inner());
+
+            // Check global limit to prevent memory exhaustion
+            if tokens.len() >= Self::MAX_TOTAL_TOKENS {
+                return Err(JdServerError::Protocol(
+                    "Server at capacity: too many active tokens".to_string(),
+                ));
+            }
+
+            // Check per-client limit
             let client_token_count = tokens
                 .values()
                 .filter(|t| t.client_id == client_id && !t.is_expired())
@@ -115,9 +130,6 @@ impl TokenManager {
             let mut tokens = self.tokens.write().unwrap_or_else(|e| e.into_inner());
             tokens.insert(token, mining_token.clone());
         }
-
-        // Cleanup expired tokens periodically
-        self.cleanup_expired();
 
         Ok(mining_token)
     }

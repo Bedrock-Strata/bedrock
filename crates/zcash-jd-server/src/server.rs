@@ -599,6 +599,16 @@ impl JdTransport {
 
                 let frame =
                     MessageFrame::decode(&header_buf).map_err(|e| JdServerError::Protocol(e.to_string()))?;
+
+                // Prevent memory exhaustion attacks - limit frame size to 1MB
+                const MAX_FRAME_SIZE: u32 = 1_048_576;
+                if frame.length > MAX_FRAME_SIZE {
+                    return Err(JdServerError::Protocol(format!(
+                        "Frame size {} exceeds maximum of 1MB",
+                        frame.length
+                    )));
+                }
+
                 let mut payload = vec![0u8; frame.length as usize];
                 if frame.length > 0 {
                     stream.read_exact(&mut payload).await?;

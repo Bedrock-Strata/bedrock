@@ -509,18 +509,52 @@ impl JdClient {
         self.template_provider.get_current_template().await
     }
 
+    /// Maximum number of transactions to cache
+    const MAX_TX_CACHE_ENTRIES: usize = 10_000;
+    /// Maximum total bytes in transaction cache (100MB)
+    const MAX_TX_CACHE_BYTES: usize = 100_000_000;
+
     /// Add a transaction to the cache for Full-Template mode
     ///
     /// The cache stores raw transaction data keyed by txid, allowing the client
     /// to respond to GetMissingTransactions requests from the server.
+    /// Cache is automatically pruned when limits are exceeded.
     pub async fn cache_transaction(&self, txid: [u8; 32], data: Vec<u8>) {
         let mut cache = self.tx_cache.write().await;
+
+        // Check if we need to prune the cache
+        if cache.len() >= Self::MAX_TX_CACHE_ENTRIES {
+            tracing::warn!("Transaction cache entry limit reached, clearing cache");
+            cache.clear();
+        }
+
+        // Check total byte size
+        let total_bytes: usize = cache.values().map(|v| v.len()).sum();
+        if total_bytes + data.len() > Self::MAX_TX_CACHE_BYTES {
+            tracing::warn!("Transaction cache byte limit reached, clearing cache");
+            cache.clear();
+        }
+
         cache.insert(txid, data);
     }
 
     /// Add multiple transactions to the cache
+    /// Cache is automatically pruned when limits are exceeded.
     pub async fn cache_transactions(&self, transactions: impl IntoIterator<Item = ([u8; 32], Vec<u8>)>) {
         let mut cache = self.tx_cache.write().await;
+
+        // Pre-check cache size
+        if cache.len() >= Self::MAX_TX_CACHE_ENTRIES {
+            tracing::warn!("Transaction cache entry limit reached, clearing cache");
+            cache.clear();
+        }
+
+        let total_bytes: usize = cache.values().map(|v| v.len()).sum();
+        if total_bytes > Self::MAX_TX_CACHE_BYTES {
+            tracing::warn!("Transaction cache byte limit reached, clearing cache");
+            cache.clear();
+        }
+
         for (txid, data) in transactions {
             cache.insert(txid, data);
         }

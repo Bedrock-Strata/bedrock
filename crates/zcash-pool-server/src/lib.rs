@@ -27,6 +27,7 @@ pub use payout::{MinerId, MinerStats, PayoutTracker};
 pub use server::{PoolServer, PoolStats};
 pub use session::{ServerMessage, Session, SessionMessage};
 pub use share::{ShareProcessor, ShareValidationResult};
+pub use fiber::FiberRelay;
 
 // Re-export JD Server types for convenient access
 pub use zcash_jd_server::{handle_jd_client, JdServer, JdServerConfig};

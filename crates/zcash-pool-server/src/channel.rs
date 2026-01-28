@@ -2,10 +2,13 @@
 //!
 //! Each miner connection gets one channel with a unique nonce_1 prefix.
 
-use zcash_equihash_validator::{VardiffController, VardiffConfig};
-use zcash_mining_protocol::messages::NewEquihashJob;
+use crate::ratelimit::RateLimiter;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+use tracing::warn;
+use zcash_equihash_validator::{VardiffConfig, VardiffController};
+use zcash_mining_protocol::messages::NewEquihashJob;
 
 /// Global channel ID counter
 /// Starts at 1, wraps at u32::MAX - 1 to avoid 0 (reserved for errors)
@@ -29,7 +32,12 @@ pub struct Channel {
     pub jobs: HashMap<u32, ChannelJob>,
     /// Last job ID sent
     pub last_job_id: u32,
+    /// Rate limiter for share submissions
+    pub rate_limiter: RateLimiter,
 }
+
+/// Default job TTL (10 minutes)
+const DEFAULT_JOB_TTL: Duration = Duration::from_secs(600);
 
 /// A job as seen by a specific channel
 #[derive(Debug, Clone)]
@@ -40,6 +48,8 @@ pub struct ChannelJob {
     pub job: NewEquihashJob,
     /// Whether this job is still valid
     pub active: bool,
+    /// When this job was created
+    pub created_at: Instant,
 }
 
 impl Channel {
@@ -69,32 +79,48 @@ impl Channel {
     }
 
     /// Create a new channel with a pre-reserved id and nonce_1 prefix.
-    pub fn new_with_id(id: u32, nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
-        assert!(nonce_1.len() <= 32, "nonce_1 length must be ≤ 32 bytes");
+    ///
+    /// Returns `None` if nonce_1 length exceeds 32 bytes.
+    pub fn new_with_id(id: u32, nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Option<Self> {
+        if nonce_1.len() > 32 {
+            warn!(
+                "Attempted to create channel with invalid nonce_1 length: {}",
+                nonce_1.len()
+            );
+            return None;
+        }
         let nonce_2_len = 32 - nonce_1.len() as u8;
-        Self {
+        Some(Self {
             id,
             nonce_1,
             nonce_2_len,
             vardiff: VardiffController::new(vardiff_config),
             jobs: HashMap::with_capacity(10),
             last_job_id: 0,
-        }
+            rate_limiter: RateLimiter::for_shares(),
+        })
     }
 
     /// Create a new channel with the given nonce_1 prefix.
-    pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
+    ///
+    /// Returns `None` if nonce_1 length exceeds 32 bytes.
+    pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Option<Self> {
         let id = Self::next_id();
         Self::new_with_id(id, nonce_1, vardiff_config)
     }
 
     /// Generate a unique nonce_1 for a channel based on channel ID
-    pub fn generate_nonce_1(channel_id: u32, len: u8) -> Vec<u8> {
+    ///
+    /// Returns `None` if len exceeds 32 bytes.
+    pub fn generate_nonce_1(channel_id: u32, len: u8) -> Option<Vec<u8>> {
+        if len > 32 {
+            return None;
+        }
         let mut nonce_1 = vec![0u8; len as usize];
         let id_bytes = channel_id.to_le_bytes();
         let copy_len = (len as usize).min(4);
         nonce_1[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
-        nonce_1
+        Some(nonce_1)
     }
 
     /// Add a job to this channel
@@ -112,6 +138,7 @@ impl Channel {
             job_id,
             job,
             active: true,
+            created_at: Instant::now(),
         };
         self.jobs.insert(job_id, channel_job);
 
@@ -127,9 +154,20 @@ impl Channel {
         self.jobs.get(&job_id)
     }
 
-    /// Check if a job is active (not stale)
+    /// Check if a job is active (not stale and not expired)
     pub fn is_job_active(&self, job_id: u32) -> bool {
-        self.jobs.get(&job_id).map(|j| j.active).unwrap_or(false)
+        self.jobs
+            .get(&job_id)
+            .map(|j| j.active && j.created_at.elapsed() < DEFAULT_JOB_TTL)
+            .unwrap_or(false)
+    }
+
+    /// Check if a job is active with a custom TTL
+    pub fn is_job_active_with_ttl(&self, job_id: u32, ttl: Duration) -> bool {
+        self.jobs
+            .get(&job_id)
+            .map(|j| j.active && j.created_at.elapsed() < ttl)
+            .unwrap_or(false)
     }
 
     /// Get current target from vardiff
@@ -142,6 +180,13 @@ impl Channel {
         self.vardiff.record_share();
         self.vardiff.maybe_retarget()
     }
+
+    /// Check if a share submission is allowed by rate limiter
+    ///
+    /// Returns true if allowed, false if rate limited
+    pub fn check_rate_limit(&mut self) -> bool {
+        self.rate_limiter.check().is_allowed()
+    }
 }
 
 #[cfg(test)]
@@ -151,24 +196,37 @@ mod tests {
     #[test]
     fn test_channel_creation() {
         let nonce_1 = vec![0x01, 0x02, 0x03, 0x04];
-        let channel = Channel::new(nonce_1.clone(), VardiffConfig::default());
+        let channel = Channel::new(nonce_1.clone(), VardiffConfig::default()).unwrap();
 
         assert_eq!(channel.nonce_1, nonce_1);
         assert_eq!(channel.nonce_2_len, 28);
     }
 
     #[test]
+    fn test_channel_creation_invalid_nonce() {
+        // nonce_1 longer than 32 bytes should fail
+        let nonce_1 = vec![0x01; 33];
+        assert!(Channel::new(nonce_1, VardiffConfig::default()).is_none());
+    }
+
+    #[test]
     fn test_nonce_1_generation() {
-        let nonce_1 = Channel::generate_nonce_1(0x12345678, 4);
+        let nonce_1 = Channel::generate_nonce_1(0x12345678, 4).unwrap();
         assert_eq!(nonce_1, vec![0x78, 0x56, 0x34, 0x12]);
 
-        let nonce_1_short = Channel::generate_nonce_1(0x12345678, 2);
+        let nonce_1_short = Channel::generate_nonce_1(0x12345678, 2).unwrap();
         assert_eq!(nonce_1_short, vec![0x78, 0x56]);
     }
 
     #[test]
+    fn test_nonce_1_generation_invalid_len() {
+        // len > 32 should fail
+        assert!(Channel::generate_nonce_1(0x12345678, 33).is_none());
+    }
+
+    #[test]
     fn test_job_management() {
-        let mut channel = Channel::new(vec![0; 4], VardiffConfig::default());
+        let mut channel = Channel::new(vec![0; 4], VardiffConfig::default()).unwrap();
 
         let job1 = NewEquihashJob {
             channel_id: channel.id,

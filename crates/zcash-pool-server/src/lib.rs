@@ -14,6 +14,7 @@ pub mod error;
 pub mod fiber;
 pub mod job;
 pub mod payout;
+pub mod ratelimit;
 pub mod server;
 pub mod session;
 pub mod share;
@@ -28,6 +29,7 @@ pub use server::{PoolServer, PoolStats};
 pub use session::{ServerMessage, Session, SessionMessage};
 pub use share::{ShareProcessor, ShareValidationResult};
 pub use fiber::FiberRelay;
+pub use ratelimit::{RateLimiter, RateLimitResult};
 
 // Re-export JD Server types for convenient access
 pub use zcash_jd_server::{handle_jd_client, JdServer, JdServerConfig};

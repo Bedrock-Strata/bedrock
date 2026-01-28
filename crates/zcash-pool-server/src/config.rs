@@ -81,7 +81,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:3333".parse().unwrap(),
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3333)),
             zebra_url: "http://127.0.0.1:8232".to_string(),
             template_poll_ms: 1000,
             validation_threads: 4,
@@ -97,11 +97,11 @@ impl Default for PoolConfig {
             jd_full_template_enabled: false,
             jd_full_template_validation: ValidationLevel::Standard,
             jd_min_pool_payout: 0,
-            metrics_addr: Some("127.0.0.1:9090".parse().unwrap()),
+            metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             json_logging: false,
             otlp_endpoint: None,
             fiber_relay_enabled: false,
-            fiber_bind_addr: Some("0.0.0.0:8336".parse().unwrap()),
+            fiber_bind_addr: Some(SocketAddr::from(([0, 0, 0, 0], 8336))),
             fiber_relay_peers: Vec::new(),
             fiber_auth_key: None,
             fiber_data_shards: 10,

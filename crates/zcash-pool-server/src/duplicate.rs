@@ -5,6 +5,7 @@
 use rustc_hash::FxHashSet;
 use std::collections::HashMap;
 use std::sync::RwLock;
+use tracing::warn;
 
 /// Trait for duplicate share detection
 pub trait DuplicateDetector: Send + Sync {
@@ -55,7 +56,12 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
         let hash = Self::hash_share(nonce_2, solution);
 
         // Handle poisoned lock gracefully - continue operating even if another thread panicked
-        let mut jobs = self.jobs.write().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| {
+            warn!(
+                "Duplicate detector lock was poisoned, recovering with potentially stale state"
+            );
+            e.into_inner()
+        });
         let shares = jobs.entry(job_id).or_default();
 
         // insert returns true if the value was NOT present
@@ -64,12 +70,22 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
     }
 
     fn clear_job(&self, job_id: u32) {
-        let mut jobs = self.jobs.write().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| {
+            warn!(
+                "Duplicate detector lock was poisoned in clear_job, recovering"
+            );
+            e.into_inner()
+        });
         jobs.remove(&job_id);
     }
 
     fn clear_all(&self) {
-        let mut jobs = self.jobs.write().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| {
+            warn!(
+                "Duplicate detector lock was poisoned in clear_all, recovering"
+            );
+            e.into_inner()
+        });
         jobs.clear();
     }
 }

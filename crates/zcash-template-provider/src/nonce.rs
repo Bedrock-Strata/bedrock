@@ -19,13 +19,17 @@ pub struct NonceRange {
 
 impl NonceRange {
     /// Construct a full 32-byte nonce from nonce_1 and nonce_2
-    pub fn make_nonce(&self, nonce_2: &[u8]) -> [u8; 32] {
-        assert_eq!(nonce_2.len(), self.nonce_2_len, "nonce_2 length mismatch");
+    ///
+    /// Returns `None` if nonce_2 length doesn't match expected length.
+    pub fn make_nonce(&self, nonce_2: &[u8]) -> Option<[u8; 32]> {
+        if nonce_2.len() != self.nonce_2_len {
+            return None;
+        }
 
         let mut nonce = [0u8; 32];
         nonce[..self.nonce_1.len()].copy_from_slice(&self.nonce_1);
         nonce[self.nonce_1.len()..].copy_from_slice(nonce_2);
-        nonce
+        Some(nonce)
     }
 }
 
@@ -38,14 +42,15 @@ pub struct NoncePartitioner {
 impl NoncePartitioner {
     /// Create a new partitioner with the given nonce_1 length
     ///
-    /// # Panics
-    /// Panics if nonce_1_len > 32
-    pub fn new(nonce_1_len: usize) -> Self {
-        assert!(nonce_1_len <= 32, "nonce_1 cannot exceed 32 bytes");
-        Self {
+    /// Returns `None` if nonce_1_len > 32
+    pub fn new(nonce_1_len: usize) -> Option<Self> {
+        if nonce_1_len > 32 {
+            return None;
+        }
+        Some(Self {
             nonce_1_len,
             next_id: AtomicU64::new(0),
-        }
+        })
     }
 
     /// Get a unique nonce range for a new miner connection
@@ -93,15 +98,27 @@ mod tests {
         };
 
         let nonce_2 = vec![0xaa; 28];
-        let full_nonce = range.make_nonce(&nonce_2);
+        let full_nonce = range.make_nonce(&nonce_2).unwrap();
 
         assert_eq!(&full_nonce[0..4], &[0x01, 0x02, 0x03, 0x04]);
         assert_eq!(&full_nonce[4..32], &[0xaa; 28]);
     }
 
     #[test]
+    fn test_make_nonce_wrong_length() {
+        let range = NonceRange {
+            nonce_1: vec![0x01, 0x02, 0x03, 0x04],
+            nonce_2_len: 28,
+        };
+
+        // Wrong length should return None
+        let nonce_2 = vec![0xaa; 10];
+        assert!(range.make_nonce(&nonce_2).is_none());
+    }
+
+    #[test]
     fn test_allocate_increments() {
-        let partitioner = NoncePartitioner::new(8);
+        let partitioner = NoncePartitioner::new(8).unwrap();
 
         let r1 = partitioner.allocate_range();
         let r2 = partitioner.allocate_range();

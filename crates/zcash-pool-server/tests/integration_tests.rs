@@ -101,7 +101,7 @@ fn test_job_distribution_flow() {
     assert_eq!(distributor.current_height(), Some(100));
 
     // Create channel and job
-    let channel = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default());
+    let channel = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default()).unwrap();
     let job = distributor.create_job(&channel, true).expect("Should create job");
 
     // Verify job contains expected data
@@ -129,8 +129,8 @@ fn test_job_ids_are_unique() {
     let mut distributor = JobDistributor::new();
     distributor.update_template(make_test_template(100, [0x11; 32]));
 
-    let channel1 = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default());
-    let channel2 = Channel::new(vec![0x05, 0x06, 0x07, 0x08], VardiffConfig::default());
+    let channel1 = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default()).unwrap();
+    let channel2 = Channel::new(vec![0x05, 0x06, 0x07, 0x08], VardiffConfig::default()).unwrap();
 
     let job1 = distributor.create_job(&channel1, true).unwrap();
     let job2 = distributor.create_job(&channel2, true).unwrap();
@@ -275,9 +275,9 @@ fn test_payout_unknown_miner() {
 #[test]
 fn test_channel_nonce_generation() {
     // Generate nonces for different channel IDs
-    let nonce1 = Channel::generate_nonce_1(1, 4);
-    let nonce2 = Channel::generate_nonce_1(2, 4);
-    let nonce3 = Channel::generate_nonce_1(256, 4);
+    let nonce1 = Channel::generate_nonce_1(1, 4).unwrap();
+    let nonce2 = Channel::generate_nonce_1(2, 4).unwrap();
+    let nonce3 = Channel::generate_nonce_1(256, 4).unwrap();
 
     // Each should be unique
     assert_ne!(nonce1, nonce2);
@@ -293,12 +293,12 @@ fn test_channel_nonce_generation() {
 #[test]
 fn test_channel_nonce_length_variations() {
     // 2-byte nonce
-    let nonce_2 = Channel::generate_nonce_1(0x1234, 2);
+    let nonce_2 = Channel::generate_nonce_1(0x1234, 2).unwrap();
     assert_eq!(nonce_2.len(), 2);
     assert_eq!(nonce_2, vec![0x34, 0x12]);
 
     // 8-byte nonce
-    let nonce_8 = Channel::generate_nonce_1(0x12345678, 8);
+    let nonce_8 = Channel::generate_nonce_1(0x12345678, 8).unwrap();
     assert_eq!(nonce_8.len(), 8);
     // First 4 bytes are the ID, rest is zero-padded
     assert_eq!(&nonce_8[0..4], &[0x78, 0x56, 0x34, 0x12]);
@@ -306,7 +306,7 @@ fn test_channel_nonce_length_variations() {
 
 #[test]
 fn test_channel_job_management() {
-    let mut channel = Channel::new(vec![0; 4], VardiffConfig::default());
+    let mut channel = Channel::new(vec![0; 4], VardiffConfig::default()).unwrap();
 
     // Create test job
     let job = NewEquihashJob {
@@ -347,15 +347,15 @@ fn test_channel_job_management() {
 #[test]
 fn test_channel_nonce_space() {
     // 4-byte nonce_1 means 28-byte nonce_2
-    let channel_4 = Channel::new(vec![0; 4], VardiffConfig::default());
+    let channel_4 = Channel::new(vec![0; 4], VardiffConfig::default()).unwrap();
     assert_eq!(channel_4.nonce_2_len, 28);
 
     // 8-byte nonce_1 means 24-byte nonce_2
-    let channel_8 = Channel::new(vec![0; 8], VardiffConfig::default());
+    let channel_8 = Channel::new(vec![0; 8], VardiffConfig::default()).unwrap();
     assert_eq!(channel_8.nonce_2_len, 24);
 
     // 16-byte nonce_1 means 16-byte nonce_2
-    let channel_16 = Channel::new(vec![0; 16], VardiffConfig::default());
+    let channel_16 = Channel::new(vec![0; 16], VardiffConfig::default()).unwrap();
     assert_eq!(channel_16.nonce_2_len, 16);
 }
 
@@ -378,8 +378,8 @@ fn test_full_job_flow() {
     assert!(is_new);
 
     // Step 2: Create channels (simulating two miners)
-    let channel1 = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default());
-    let channel2 = Channel::new(vec![0x05, 0x06, 0x07, 0x08], VardiffConfig::default());
+    let channel1 = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default()).unwrap();
+    let channel2 = Channel::new(vec![0x05, 0x06, 0x07, 0x08], VardiffConfig::default()).unwrap();
 
     // Step 3: Create jobs for each channel
     let job1 = distributor.create_job(&channel1, true).unwrap();

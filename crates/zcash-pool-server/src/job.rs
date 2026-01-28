@@ -126,7 +126,7 @@ mod tests {
         let template = make_template(100, [0x11; 32]);
         distributor.update_template(template);
 
-        let channel = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default());
+        let channel = Channel::new(vec![0x01, 0x02, 0x03, 0x04], VardiffConfig::default()).unwrap();
         let job = distributor.create_job(&channel, false).unwrap();
 
         assert_eq!(job.channel_id, channel.id);

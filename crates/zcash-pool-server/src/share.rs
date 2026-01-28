@@ -137,24 +137,14 @@ impl ShareProcessor {
 
     /// Convert hash to difficulty
     fn hash_to_difficulty(&self, hash: &[u8; 32]) -> f64 {
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(hash);
-        let target = Target::from_le_bytes(bytes);
+        let target = Target::from_le_bytes(*hash);
         target_to_difficulty(&target)
     }
 
-    /// Check if hash meets target
+    /// Check if hash meets target using the canonical Target::is_met_by()
     fn meets_target(&self, hash: &[u8; 32], target: &[u8; 32]) -> bool {
-        // Compare as little-endian 256-bit integers
-        for i in (0..32).rev() {
-            if hash[i] < target[i] {
-                return true;
-            }
-            if hash[i] > target[i] {
-                return false;
-            }
-        }
-        true
+        let target = Target::from_le_bytes(*target);
+        target.is_met_by(hash)
     }
 }
 

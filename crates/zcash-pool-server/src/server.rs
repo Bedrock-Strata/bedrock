@@ -408,7 +408,19 @@ impl PoolServer {
     ) -> Result<()> {
         // Generate unique nonce_1 for this channel
         let channel_id = Channel::next_id();
-        let nonce_1 = Channel::generate_nonce_1(channel_id, self.config.nonce_1_len);
+        let nonce_1 = match Channel::generate_nonce_1(channel_id, self.config.nonce_1_len) {
+            Some(n) => n,
+            None => {
+                error!(
+                    "Invalid nonce_1_len configuration: {}",
+                    self.config.nonce_1_len
+                );
+                return Err(PoolError::InvalidMessage(format!(
+                    "Invalid nonce_1_len: {}",
+                    self.config.nonce_1_len
+                )));
+            }
+        };
 
         // Create vardiff config
         let vardiff_config = VardiffConfig {
@@ -420,7 +432,15 @@ impl PoolServer {
         };
 
         // Create channel
-        let channel = Channel::new_with_id(channel_id, nonce_1, vardiff_config);
+        let channel = match Channel::new_with_id(channel_id, nonce_1, vardiff_config) {
+            Some(c) => c,
+            None => {
+                error!("Failed to create channel {}", channel_id);
+                return Err(PoolError::InvalidMessage(
+                    "Failed to create channel".to_string(),
+                ));
+            }
+        };
 
         // Create communication channels
         let (server_to_session_tx, server_to_session_rx) = mpsc::channel(1000);

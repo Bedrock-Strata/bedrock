@@ -8,7 +8,33 @@ use zcash_template_provider::types::BlockTemplate;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Global job ID counter (unique across all channels)
+/// Starts at 1, wraps at u32::MAX - 1 to avoid 0 (reserved for errors)
 static NEXT_GLOBAL_JOB_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Maximum job ID before wrapping (reserve 0 and u32::MAX)
+const MAX_JOB_ID: u32 = u32::MAX - 1;
+
+/// Get the next global job ID with safe wraparound
+fn next_job_id() -> u32 {
+    loop {
+        let current = NEXT_GLOBAL_JOB_ID.load(Ordering::SeqCst);
+        let next = if current >= MAX_JOB_ID {
+            // Wrap around to 1 (0 is reserved)
+            1
+        } else {
+            current + 1
+        };
+
+        // Try to atomically update; if another thread beat us, retry
+        if NEXT_GLOBAL_JOB_ID
+            .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return current;
+        }
+        // Another thread updated it, retry
+    }
+}
 
 /// Job distributor - creates jobs from templates
 pub struct JobDistributor {
@@ -43,7 +69,7 @@ impl JobDistributor {
 
         Some(NewEquihashJob {
             channel_id: channel.id,
-            job_id: NEXT_GLOBAL_JOB_ID.fetch_add(1, Ordering::SeqCst),
+            job_id: next_job_id(),
             future_job: false,
             version: template.header.version,
             prev_hash: template.header.prev_hash.0,

@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use tracing::warn;
 
+/// Maximum shares per job to prevent memory exhaustion
+/// At 1344 bytes per solution hash (reduced to u64), 100k shares ~= 800KB per job
+const MAX_SHARES_PER_JOB: usize = 100_000;
+
 /// Trait for duplicate share detection
 pub trait DuplicateDetector: Send + Sync {
     /// Check if a share is a duplicate (and record it if not)
@@ -18,6 +22,17 @@ pub trait DuplicateDetector: Send + Sync {
 
     /// Clear all jobs (called on new block)
     fn clear_all(&self);
+}
+
+/// Result of duplicate check
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateCheckResult {
+    /// Share is new (not a duplicate)
+    New,
+    /// Share is a duplicate
+    Duplicate,
+    /// Job is at capacity, treating as duplicate to prevent memory exhaustion
+    AtCapacity,
 }
 
 /// In-memory duplicate detector using hash sets
@@ -63,6 +78,19 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
             e.into_inner()
         });
         let shares = jobs.entry(job_id).or_default();
+
+        // Check if already at capacity - reject to prevent memory exhaustion
+        if shares.len() >= MAX_SHARES_PER_JOB {
+            if !shares.contains(&hash) {
+                warn!(
+                    "Job {} hit share limit ({}), rejecting new shares",
+                    job_id, MAX_SHARES_PER_JOB
+                );
+            }
+            // Return true (duplicate) if not found, or true if actually duplicate
+            // Either way, we don't add more shares
+            return true;
+        }
 
         // insert returns true if the value was NOT present
         // So we return the opposite: true if it IS a duplicate

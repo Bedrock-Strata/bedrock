@@ -31,6 +31,8 @@ pub struct PayoutTracker {
     miners: RwLock<HashMap<MinerId, MinerStats>>,
     /// Window duration for rate calculations
     window_duration: Duration,
+    /// When the current window started (first share in window)
+    window_start: RwLock<Option<Instant>>,
 }
 
 impl PayoutTracker {
@@ -38,11 +40,22 @@ impl PayoutTracker {
         Self {
             miners: RwLock::new(HashMap::new()),
             window_duration,
+            window_start: RwLock::new(None),
         }
     }
 
     /// Record a share for a miner
     pub fn record_share(&self, miner_id: &MinerId, difficulty: f64) {
+        let now = Instant::now();
+
+        // Set window start on first share in window
+        {
+            let mut window_start = self.window_start.write().unwrap_or_else(|e| e.into_inner());
+            if window_start.is_none() {
+                *window_start = Some(now);
+            }
+        }
+
         // Handle poisoned lock gracefully - continue operating even if another thread panicked
         let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
         let stats = miners.entry(miner_id.clone()).or_default();
@@ -51,7 +64,7 @@ impl PayoutTracker {
         stats.total_difficulty += difficulty;
         stats.window_shares += 1;
         stats.window_difficulty += difficulty;
-        stats.last_share = Some(Instant::now());
+        stats.last_share = Some(now);
     }
 
     /// Get statistics for a miner
@@ -68,6 +81,12 @@ impl PayoutTracker {
 
     /// Reset window statistics (call periodically)
     pub fn reset_window(&self) {
+        // Reset window start time
+        {
+            let mut window_start = self.window_start.write().unwrap_or_else(|e| e.into_inner());
+            *window_start = None;
+        }
+
         let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
         for stats in miners.values_mut() {
             stats.window_shares = 0;
@@ -80,8 +99,20 @@ impl PayoutTracker {
         let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());
         let total_difficulty: f64 = miners.values().map(|s| s.window_difficulty).sum();
 
+        // Use actual elapsed time, capped at window_duration
+        let elapsed = {
+            let window_start = self.window_start.read().unwrap_or_else(|e| e.into_inner());
+            match *window_start {
+                Some(start) => start.elapsed().min(self.window_duration),
+                None => return 0.0, // No shares yet
+            }
+        };
+
+        // Require at least 1 second of data to avoid division issues
+        let elapsed_secs = elapsed.as_secs_f64().max(1.0);
+
         // Hashrate = difficulty / time (simplified)
-        total_difficulty / self.window_duration.as_secs_f64()
+        total_difficulty / elapsed_secs
     }
 
     /// Number of active miners (submitted share in window)

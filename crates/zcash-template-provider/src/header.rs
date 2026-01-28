@@ -34,6 +34,14 @@ pub fn assemble_header(template: &GetBlockTemplateResponse) -> Result<EquihashHe
     let bits = u32::from_str_radix(&template.bits, 16)
         .map_err(|e| Error::InvalidTemplate(format!("invalid bits: {}", e)))?;
 
+    // Validate timestamp fits in u32 (won't overflow until year 2106)
+    if template.cur_time > u32::MAX as u64 {
+        return Err(Error::InvalidTemplate(format!(
+            "timestamp {} exceeds u32::MAX",
+            template.cur_time
+        )));
+    }
+
     Ok(EquihashHeader {
         version: template.version,
         prev_hash,

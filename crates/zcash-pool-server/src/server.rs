@@ -490,13 +490,21 @@ impl PoolServer {
 
         // Spawn session task
         let sessions = Arc::clone(&self.sessions);
+        let channels = Arc::clone(&self.channels);
         let metrics = Arc::clone(&self.metrics);
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
                 debug!("Session {} ended: {}", channel_id, e);
             }
-            // Clean up session on exit
-            sessions.write().await.remove(&channel_id);
+            // Clean up session and channel atomically on exit
+            // Note: We take both locks before modifying either to prevent race conditions
+            // where share validation could access a channel that's partially cleaned up
+            {
+                let mut sessions_guard = sessions.write().await;
+                let mut channels_guard = channels.write().await;
+                sessions_guard.remove(&channel_id);
+                channels_guard.remove(&channel_id);
+            }
             metrics.record_disconnection();
         });
 
@@ -600,8 +608,13 @@ impl PoolServer {
             }
             SessionMessage::Disconnected { channel_id } => {
                 info!("Session {} disconnected", channel_id);
-                self.sessions.write().await.remove(&channel_id);
-                self.channels.write().await.remove(&channel_id);
+                // Clean up atomically - take both locks before modifying either
+                {
+                    let mut sessions_guard = self.sessions.write().await;
+                    let mut channels_guard = self.channels.write().await;
+                    sessions_guard.remove(&channel_id);
+                    channels_guard.remove(&channel_id);
+                }
                 Ok(())
             }
         }
@@ -614,6 +627,22 @@ impl PoolServer {
         share: zcash_mining_protocol::messages::SubmitEquihashShare,
         response_tx: tokio::sync::oneshot::Sender<zcash_mining_protocol::messages::ShareResult>,
     ) -> Result<()> {
+        // Check rate limit BEFORE any expensive validation
+        {
+            let mut channels = self.channels.write().await;
+            if let Some(channel) = channels.get_mut(&channel_id) {
+                if !channel.check_rate_limit() {
+                    debug!("Rate limiting channel {}", channel_id);
+                    return response_tx
+                        .send(ShareResult::Rejected(
+                            zcash_mining_protocol::messages::RejectReason::Other("rate limited".to_string()),
+                        ))
+                        .map_err(|_| PoolError::ChannelSend)
+                        .map(|_| ());
+                }
+            }
+        }
+
         // Get block target
         let block_target = *self.current_block_target.read().await;
 
@@ -685,10 +714,12 @@ impl PoolServer {
                         // This gives the relay network a head start
                         if let Some(ref fiber) = self.fiber_relay {
                             let header = job.build_header(&job.build_nonce(&share.nonce_2).unwrap_or_default());
-                            let tx_hashes: Vec<[u8; 32]> = {
+
+                            // Clone all needed data atomically in one lock acquisition
+                            let fiber_data = {
                                 let distributor = self.job_distributor.read().await;
-                                distributor.current_template()
-                                    .map(|t| t.transactions.iter()
+                                distributor.current_template().map(|t| {
+                                    let tx_hashes: Vec<[u8; 32]> = t.transactions.iter()
                                         .filter_map(|tx| {
                                             let bytes = hex::decode(&tx.hash).ok()?;
                                             if bytes.len() == 32 {
@@ -700,14 +731,14 @@ impl PoolServer {
                                                 None
                                             }
                                         })
-                                        .collect())
-                                    .unwrap_or_default()
+                                        .collect();
+                                    let coinbase = t.coinbase.clone();
+                                    (coinbase, tx_hashes)
+                                })
                             };
 
-                            let fiber = Arc::clone(fiber);
-                            let template = self.job_distributor.read().await.current_template();
-                            if let Some(tmpl) = template {
-                                let coinbase = tmpl.coinbase.clone();
+                            if let Some((coinbase, tx_hashes)) = fiber_data {
+                                let fiber = Arc::clone(fiber);
                                 tokio::spawn(async move {
                                     if let Err(e) = fiber.announce_block(&header, &coinbase, &tx_hashes).await {
                                         warn!("Failed to announce block to fiber relay: {}", e);

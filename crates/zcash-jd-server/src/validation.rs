@@ -271,9 +271,15 @@ impl TemplateValidator {
             }
         }
 
-        if let Some(root) = Self::compute_merkle_root(&job.coinbase_tx, &job.tx_short_ids) {
-            if root != job.merkle_root {
-                return ValidationResult::Invalid("invalid merkle root".into());
+        match Self::compute_merkle_root(&job.coinbase_tx, &job.tx_short_ids) {
+            Some(root) => {
+                if root != job.merkle_root {
+                    return ValidationResult::Invalid("invalid merkle root".into());
+                }
+            }
+            None => {
+                // Empty coinbase in Standard/Strict mode is invalid
+                return ValidationResult::Invalid("empty coinbase transaction".into());
             }
         }
 

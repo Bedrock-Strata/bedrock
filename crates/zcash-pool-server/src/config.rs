@@ -63,6 +63,19 @@ pub struct PoolConfig {
 
     /// OTLP endpoint for distributed tracing
     pub otlp_endpoint: Option<String>,
+
+    /// Fiber relay configuration (optional - None disables relay)
+    pub fiber_relay_enabled: bool,
+    /// UDP bind address for fiber relay (default: 0.0.0.0:8336)
+    pub fiber_bind_addr: Option<SocketAddr>,
+    /// Relay peer addresses to connect to
+    pub fiber_relay_peers: Vec<SocketAddr>,
+    /// Shared authentication key for relay network (32 bytes)
+    pub fiber_auth_key: Option<[u8; 32]>,
+    /// FEC data shards (default: 10)
+    pub fiber_data_shards: usize,
+    /// FEC parity shards (default: 3)
+    pub fiber_parity_shards: usize,
 }
 
 impl Default for PoolConfig {
@@ -87,6 +100,12 @@ impl Default for PoolConfig {
             metrics_addr: Some("127.0.0.1:9090".parse().unwrap()),
             json_logging: false,
             otlp_endpoint: None,
+            fiber_relay_enabled: false,
+            fiber_bind_addr: Some("0.0.0.0:8336".parse().unwrap()),
+            fiber_relay_peers: Vec::new(),
+            fiber_auth_key: None,
+            fiber_data_shards: 10,
+            fiber_parity_shards: 3,
         }
     }
 }

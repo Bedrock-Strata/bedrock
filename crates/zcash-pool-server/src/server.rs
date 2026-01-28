@@ -486,6 +486,17 @@ impl PoolServer {
             .set_current_prev_hash(template.header.prev_hash.0)
             .await;
 
+        // Announce to fiber relay network (non-blocking)
+        if let Some(ref fiber) = self.fiber_relay {
+            let fiber = Arc::clone(fiber);
+            let template_clone = template.clone();
+            tokio::spawn(async move {
+                if let Err(e) = fiber.announce_template(&template_clone).await {
+                    warn!("Failed to announce template to fiber relay: {}", e);
+                }
+            });
+        }
+
         // Update job distributor
         let is_new_block = {
             let mut distributor = self.job_distributor.write().await;

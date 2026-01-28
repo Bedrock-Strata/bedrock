@@ -8,11 +8,30 @@ use zcash_pool_server::{PoolConfig, PoolServer};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let config = PoolConfig {
+    let mut config = PoolConfig {
         listen_addr: "127.0.0.1:3333".parse()?,
         zebra_url: "http://127.0.0.1:8232".to_string(),
         ..Default::default()
     };
+
+    // Fiber relay configuration (optional)
+    // Enable for low-latency block propagation to relay network.
+    // When enabled, the pool will broadcast newly found blocks to relay peers
+    // using UDP with forward error correction (FEC) for fast, reliable delivery.
+    config.fiber_relay_enabled = false; // Set to true to enable
+    config.fiber_relay_peers = vec![
+        // Add relay peer addresses here, e.g.:
+        // "relay1.example.com:8336".parse().unwrap(),
+        // "relay2.example.com:8336".parse().unwrap(),
+    ];
+    // Optional: bind address for receiving relay messages (default: 0.0.0.0:8336)
+    // config.fiber_bind_addr = Some("0.0.0.0:8336".parse().unwrap());
+    // Optional: shared authentication key with relay peers (32 bytes)
+    // config.fiber_auth_key = Some([0x42; 32]);
+    // FEC parameters: data_shards + parity_shards = total shards sent
+    // More parity shards = better recovery from packet loss, but more bandwidth
+    config.fiber_data_shards = 10;
+    config.fiber_parity_shards = 3;
 
     println!("=== Zcash Pool Server ===");
     println!("Listening on: {}", config.listen_addr);

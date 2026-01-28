@@ -18,22 +18,24 @@ use crate::duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 use crate::error::{PoolError, Result};
 use crate::job::JobDistributor;
 use crate::payout::{MinerId, PayoutTracker};
-use crate::session::{ServerMessage, Session, SessionMessage};
+use crate::session::{ServerMessage, Session, SessionMessage, Transport};
 use crate::share::ShareProcessor;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use zcash_equihash_validator::VardiffConfig;
-use zcash_jd_server::{handle_jd_client, JdServer, JdServerConfig};
+use zcash_jd_server::{handle_jd_client_with_transport, JdServer, JdServerConfig, JdTransport};
+use zcash_mining_protocol::messages::{NewEquihashJob, ShareResult};
 use zcash_stratum_noise::{Keypair, NoiseResponder};
 use zcash_stratum_observability::{init_logging, start_metrics_server, LogFormat, PoolMetrics};
 use zcash_template_provider::types::BlockTemplate;
 use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
+use zcash_mining_protocol::messages::SubmitEquihashShare;
+use hex;
 
 /// Main pool server
 pub struct PoolServer {
@@ -51,12 +53,12 @@ pub struct PoolServer {
     payout_tracker: Arc<PayoutTracker>,
     /// Active sessions (channel_id -> sender)
     sessions: Arc<RwLock<HashMap<u32, mpsc::Sender<ServerMessage>>>>,
+    /// Channel state (channel_id -> Channel)
+    channels: Arc<RwLock<HashMap<u32, Channel>>>,
     /// Channel for session messages
     session_tx: mpsc::Sender<SessionMessage>,
     /// Receiver for session messages
     session_rx: mpsc::Receiver<SessionMessage>,
-    /// Channel ID counter for nonce generation
-    next_channel_id: AtomicU32,
     /// Current block target (for checking block finds)
     current_block_target: Arc<RwLock<[u8; 32]>>,
     /// JD Server (embedded, optional)
@@ -100,14 +102,18 @@ impl PoolServer {
         // Create JD Server with shared payout tracker
         let jd_config = JdServerConfig {
             pool_payout_script: config.pool_payout_script.clone().unwrap_or_default(),
+            noise_enabled: config.jd_noise_enabled,
+            full_template_enabled: config.jd_full_template_enabled,
+            full_template_validation: config.jd_full_template_validation,
+            min_pool_payout: config.jd_min_pool_payout,
             ..JdServerConfig::default()
         };
         let jd_server = Arc::new(JdServer::new(jd_config, Arc::clone(&payout_tracker)));
 
         let jd_listen_addr = config.jd_listen_addr;
 
-        // Create Noise responder if enabled
-        let noise_responder = if config.noise_enabled {
+        // Create Noise responder if enabled for miner or JD connections
+        let noise_responder = if config.noise_enabled || config.jd_noise_enabled {
             let keypair = if let Some(ref key_path) = config.noise_private_key_path {
                 // Load keypair from file
                 let key_hex = std::fs::read_to_string(key_path)
@@ -137,9 +143,9 @@ impl PoolServer {
             duplicate_detector: Arc::new(InMemoryDuplicateDetector::new()),
             payout_tracker,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            channels: Arc::new(RwLock::new(HashMap::new())),
             session_tx,
             session_rx,
-            next_channel_id: AtomicU32::new(1),
             current_block_target: Arc::new(RwLock::new([0xff; 32])),
             jd_server,
             jd_listen_addr,
@@ -225,31 +231,33 @@ impl PoolServer {
                             self.metrics.record_connection();
 
                             // Handle Noise handshake if enabled
-                            if let Some(ref responder) = self.noise_responder {
-                                self.metrics.record_noise_handshake();
-                                let responder = Arc::clone(responder);
-                                let metrics = Arc::clone(&self.metrics);
-
-                                tokio::spawn(async move {
+                            if self.config.noise_enabled {
+                                if let Some(ref responder) = self.noise_responder {
+                                    self.metrics.record_noise_handshake();
                                     match responder.accept(stream).await {
-                                        Ok(_noise_stream) => {
-                                            // TODO: Use noise_stream instead of raw stream
-                                            // For now, we just log success; actual encrypted transport
-                                            // requires changes to Session to use NoiseStream
+                                        Ok(noise_stream) => {
                                             info!("Noise handshake successful for {}", addr);
-                                            // Note: Full integration would require Session to work with NoiseStream
-                                            // This is a placeholder showing the handshake works
+                                            if let Err(e) = self.handle_new_connection(Transport::Noise(noise_stream)).await {
+                                                self.metrics.record_disconnection();
+                                                error!("Error handling new Noise connection: {}", e);
+                                            }
                                         }
                                         Err(e) => {
-                                            metrics.record_noise_handshake_failed();
-                                            metrics.record_disconnection();
+                                            self.metrics.record_noise_handshake_failed();
+                                            self.metrics.record_disconnection();
                                             warn!("Noise handshake failed for {}: {}", addr, e);
                                         }
                                     }
-                                });
+                                } else {
+                                    warn!("Noise enabled but no responder available; falling back to plaintext");
+                                    if let Err(e) = self.handle_new_connection(Transport::Plain(stream)).await {
+                                        self.metrics.record_disconnection();
+                                        error!("Error handling new connection: {}", e);
+                                    }
+                                }
                             } else {
                                 // No Noise - handle connection directly
-                                if let Err(e) = self.handle_new_connection(stream).await {
+                                if let Err(e) = self.handle_new_connection(Transport::Plain(stream)).await {
                                     self.metrics.record_disconnection();
                                     error!("Error handling new connection: {}", e);
                                 }
@@ -276,8 +284,30 @@ impl PoolServer {
                         let jd_server = Arc::clone(&self.jd_server);
                         let metrics = Arc::clone(&self.metrics);
                         let client_id = format!("jd_{}", addr);
+                        let jd_noise_enabled = self.config.jd_noise_enabled;
+                        let responder = self.noise_responder.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_jd_client(stream, jd_server, client_id).await {
+                            let transport = if jd_noise_enabled {
+                                if let Some(responder) = responder {
+                                    metrics.record_noise_handshake();
+                                    match responder.accept(stream).await {
+                                        Ok(noise_stream) => JdTransport::Noise(noise_stream),
+                                        Err(e) => {
+                                            metrics.record_noise_handshake_failed();
+                                            warn!("JD Noise handshake failed from {}: {}", addr, e);
+                                            metrics.record_jd_disconnection();
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    warn!("JD Noise enabled but no responder available; falling back to plaintext");
+                                    JdTransport::Plain(stream)
+                                }
+                            } else {
+                                JdTransport::Plain(stream)
+                            };
+
+                            if let Err(e) = handle_jd_client_with_transport(transport, jd_server, client_id).await {
                                 warn!("JD client error: {}", e);
                             }
                             metrics.record_jd_disconnection();
@@ -316,10 +346,10 @@ impl PoolServer {
     /// Handle a new miner connection
     async fn handle_new_connection(
         &self,
-        stream: tokio::net::TcpStream,
+        transport: Transport,
     ) -> Result<()> {
         // Generate unique nonce_1 for this channel
-        let channel_id = self.next_channel_id.fetch_add(1, Ordering::SeqCst);
+        let channel_id = Channel::next_id();
         let nonce_1 = Channel::generate_nonce_1(channel_id, self.config.nonce_1_len);
 
         // Create vardiff config
@@ -332,8 +362,7 @@ impl PoolServer {
         };
 
         // Create channel
-        let channel = Channel::new(nonce_1, vardiff_config);
-        let channel_id = channel.id;
+        let channel = Channel::new_with_id(channel_id, nonce_1, vardiff_config);
 
         // Create communication channels
         let (server_to_session_tx, server_to_session_rx) = mpsc::channel(1000);
@@ -344,28 +373,41 @@ impl PoolServer {
             sessions.insert(channel_id, server_to_session_tx.clone());
         }
 
+        // Store channel state
+        {
+            let mut channels = self.channels.write().await;
+            channels.insert(channel_id, channel);
+        }
+
         // Create session
         let session = Session::new(
-            stream,
-            channel,
+            transport,
+            channel_id,
             self.session_tx.clone(),
             server_to_session_rx,
         );
 
         // Send initial job if available
-        {
+        let initial_job = {
             let distributor = self.job_distributor.read().await;
             if distributor.has_template() {
-                // We need mutable access to channel for creating job, but session owns it
-                // Instead, create the job here and send it
-                let temp_channel = Channel::new(
-                    Channel::generate_nonce_1(channel_id, self.config.nonce_1_len),
-                    VardiffConfig::default(),
-                );
-                if let Some(job) = distributor.create_job(&temp_channel, true) {
-                    let _ = server_to_session_tx.send(ServerMessage::NewJob(job)).await;
+                let mut channels = self.channels.write().await;
+                if let Some(channel) = channels.get_mut(&channel_id) {
+                    if let Some(job) = distributor.create_job(channel, true) {
+                        channel.add_job(job.clone(), true);
+                        Some(job)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        };
+        if let Some(job) = initial_job {
+            let _ = server_to_session_tx.send(ServerMessage::NewJob(job)).await;
         }
 
         // Spawn session task
@@ -379,6 +421,7 @@ impl PoolServer {
             sessions.write().await.remove(&channel_id);
             metrics.record_disconnection();
         });
+
 
         info!("Session {} started", channel_id);
         Ok(())
@@ -428,18 +471,23 @@ impl PoolServer {
         }
 
         let mut broadcast_count = 0;
-        for (&channel_id, sender) in sessions.iter() {
-            // Create a temporary channel for job creation
-            // Note: In production, we'd want to track channels separately
-            let temp_channel = Channel::new(
-                Channel::generate_nonce_1(channel_id, self.config.nonce_1_len),
-                VardiffConfig::default(),
-            );
+        let mut jobs_to_send: Vec<(mpsc::Sender<ServerMessage>, NewEquihashJob)> = Vec::new();
 
-            if let Some(job) = distributor.create_job(&temp_channel, clean_jobs) {
-                if sender.send(ServerMessage::NewJob(job)).await.is_ok() {
-                    broadcast_count += 1;
+        {
+            let mut channels = self.channels.write().await;
+            for (&channel_id, sender) in sessions.iter() {
+                if let Some(channel) = channels.get_mut(&channel_id) {
+                    if let Some(job) = distributor.create_job(channel, clean_jobs) {
+                        channel.add_job(job.clone(), clean_jobs);
+                        jobs_to_send.push((sender.clone(), job));
+                    }
                 }
+            }
+        }
+
+        for (sender, job) in jobs_to_send {
+            if sender.send(ServerMessage::NewJob(job)).await.is_ok() {
+                broadcast_count += 1;
             }
         }
 
@@ -458,12 +506,13 @@ impl PoolServer {
                 share,
                 response_tx,
             } => {
-                self.handle_share_submission(channel_id, share, response_tx)
+                self.handle_share_submission(channel_id, *share, response_tx)
                     .await
             }
             SessionMessage::Disconnected { channel_id } => {
                 info!("Session {} disconnected", channel_id);
                 self.sessions.write().await.remove(&channel_id);
+                self.channels.write().await.remove(&channel_id);
                 Ok(())
             }
         }
@@ -476,23 +525,54 @@ impl PoolServer {
         share: zcash_mining_protocol::messages::SubmitEquihashShare,
         response_tx: tokio::sync::oneshot::Sender<zcash_mining_protocol::messages::ShareResult>,
     ) -> Result<()> {
-        // Create a temporary channel for validation
-        // Note: In production, we'd track actual channel state
-        let channel = Channel::new(
-            Channel::generate_nonce_1(channel_id, self.config.nonce_1_len),
-            VardiffConfig::default(),
-        );
-
         // Get block target
         let block_target = *self.current_block_target.read().await;
 
-        // Validate share
-        let result = self.share_processor.validate_share(
+        // Grab the job without holding the lock during validation
+        let job = {
+            let channels = self.channels.read().await;
+            let channel = channels.get(&channel_id).ok_or(PoolError::UnknownChannel(channel_id))?;
+            let channel_job = channel
+                .get_job(share.job_id)
+                .ok_or(PoolError::UnknownJob(share.job_id))?;
+            if !channel_job.active {
+                return response_tx
+                    .send(ShareResult::Rejected(
+                        zcash_mining_protocol::messages::RejectReason::StaleJob,
+                    ))
+                    .map_err(|_| PoolError::ChannelSend)
+                    .map(|_| ());
+            }
+            channel_job.job.clone()
+        };
+
+        // Validate share without holding the channel lock
+        let result = self.share_processor.validate_share_with_job(
             &share,
-            &channel,
+            &job,
             self.duplicate_detector.as_ref(),
             &block_target,
         );
+
+        // Apply vardiff update if the share was accepted
+        let maybe_new_target = if let Ok(ref validation) = result {
+            if validation.accepted {
+                let mut channels = self.channels.write().await;
+                if let Some(channel) = channels.get_mut(&channel_id) {
+                    if channel.record_share().is_some() {
+                        Some(channel.current_target())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let share_result = match result {
             Ok(validation) => {
@@ -511,7 +591,9 @@ impl PoolServer {
                             share.job_id,
                             self.job_distributor.read().await.current_height()
                         );
-                        // TODO: Submit block to network
+                        if let Err(e) = self.submit_block(&job, &share).await {
+                            warn!("Failed to submit block for job {}: {}", share.job_id, e);
+                        }
                     }
 
                     debug!(
@@ -530,8 +612,49 @@ impl PoolServer {
             }
         };
 
+        // Apply vardiff target update if needed
+        if let Some(target) = maybe_new_target {
+            if let Some(sender) = self.sessions.read().await.get(&channel_id) {
+                let _ = sender
+                    .send(ServerMessage::SetTarget { target })
+                    .await;
+            }
+        }
+
         // Send response back to session
         let _ = response_tx.send(share_result);
+
+        Ok(())
+    }
+
+    async fn submit_block(&self, job: &NewEquihashJob, share: &SubmitEquihashShare) -> Result<()> {
+        let template = {
+            let distributor = self.job_distributor.read().await;
+            distributor
+                .current_template()
+                .ok_or_else(|| PoolError::TemplateProvider("missing current template".to_string()))?
+        };
+
+        if template.header.prev_hash.0 != job.prev_hash {
+            return Err(PoolError::TemplateProvider(
+                "template prev_hash mismatch for solved job".to_string(),
+            ));
+        }
+
+        let block_bytes = build_block_bytes(job, share, &template)?;
+        let block_hex = hex::encode(block_bytes);
+
+        match self.template_provider.submit_block(&block_hex).await {
+            Ok(None) => {
+                info!("Submitted block for job {} successfully", share.job_id);
+            }
+            Ok(Some(err)) => {
+                warn!("Zebra rejected block for job {}: {}", share.job_id, err);
+            }
+            Err(e) => {
+                return Err(PoolError::TemplateProvider(e.to_string()));
+            }
+        }
 
         Ok(())
     }
@@ -573,6 +696,60 @@ pub struct PoolStats {
     pub estimated_hashrate: f64,
     /// Current block height
     pub current_height: Option<u64>,
+}
+
+fn write_varint(value: u64, out: &mut Vec<u8>) {
+    if value < 0xfd {
+        out.push(value as u8);
+    } else if value <= 0xffff {
+        out.push(0xfd);
+        out.extend_from_slice(&(value as u16).to_le_bytes());
+    } else if value <= 0xffff_ffff {
+        out.push(0xfe);
+        out.extend_from_slice(&(value as u32).to_le_bytes());
+    } else {
+        out.push(0xff);
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn build_block_bytes(
+    job: &NewEquihashJob,
+    share: &SubmitEquihashShare,
+    template: &BlockTemplate,
+) -> Result<Vec<u8>> {
+    if template.coinbase.is_empty() {
+        return Err(PoolError::TemplateProvider(
+            "template coinbase is empty".to_string(),
+        ));
+    }
+
+    let full_nonce = job
+        .build_nonce(&share.nonce_2)
+        .ok_or_else(|| PoolError::InvalidMessage("Invalid nonce_2 length".to_string()))?;
+    let mut header = job.build_header(&full_nonce);
+    header[100..104].copy_from_slice(&share.time.to_le_bytes());
+
+    let mut block = Vec::with_capacity(
+        header.len()
+            + share.solution.len()
+            + template.coinbase.len()
+            + template.transactions.len() * 100,
+    );
+    block.extend_from_slice(&header);
+    block.extend_from_slice(&share.solution);
+
+    let tx_count = 1 + template.transactions.len() as u64;
+    write_varint(tx_count, &mut block);
+    block.extend_from_slice(&template.coinbase);
+
+    for tx in &template.transactions {
+        let tx_bytes = hex::decode(&tx.data)
+            .map_err(|e| PoolError::TemplateProvider(format!("invalid tx data: {}", e)))?;
+        block.extend_from_slice(&tx_bytes);
+    }
+
+    Ok(block)
 }
 
 #[cfg(test)]

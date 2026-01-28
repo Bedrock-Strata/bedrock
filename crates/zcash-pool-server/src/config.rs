@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use zcash_jd_server::ValidationLevel;
 
 /// Pool server configuration
 #[derive(Debug, Clone)]
@@ -45,6 +46,15 @@ pub struct PoolConfig {
     /// Enable Noise for JD connections
     pub jd_noise_enabled: bool,
 
+    /// Enable Full-Template mode for JD server
+    pub jd_full_template_enabled: bool,
+
+    /// Validation level for Full-Template mode
+    pub jd_full_template_validation: ValidationLevel,
+
+    /// Minimum pool payout value (zatoshis) for Full-Template mode
+    pub jd_min_pool_payout: u64,
+
     /// Metrics server address
     pub metrics_addr: Option<SocketAddr>,
 
@@ -71,6 +81,9 @@ impl Default for PoolConfig {
             noise_enabled: false,
             noise_private_key_path: None,
             jd_noise_enabled: false,
+            jd_full_template_enabled: false,
+            jd_full_template_validation: ValidationLevel::Standard,
+            jd_min_pool_payout: 0,
             metrics_addr: Some("127.0.0.1:9090".parse().unwrap()),
             json_logging: false,
             otlp_endpoint: None,

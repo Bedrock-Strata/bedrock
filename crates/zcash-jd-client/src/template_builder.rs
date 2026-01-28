@@ -4,7 +4,15 @@
 //! and adds the pool's required coinbase output.
 
 use crate::error::{JdClientError, Result};
-use zcash_template_provider::types::BlockTemplate;
+use sha2::{Digest, Sha256};
+use zcash_template_provider::types::{BlockTemplate, Hash256};
+
+struct TxOut {
+    value: u64,
+    script: Vec<u8>,
+}
+
+type CoinbaseOutputs = (Vec<u8>, u64, Vec<TxOut>, Vec<u8>);
 
 /// Template builder that adds pool coinbase requirements
 pub struct TemplateBuilder {
@@ -47,17 +55,78 @@ impl TemplateBuilder {
             )));
         }
 
-        // For MVP, return the template's coinbase
-        // TODO: Proper coinbase construction with pool output
-        Ok(template.coinbase.clone())
+        if self.pool_coinbase_output.is_empty() {
+            return Ok(template.coinbase.clone());
+        }
+
+        if contains_script(&template.coinbase, &self.pool_coinbase_output) {
+            return Ok(template.coinbase.clone());
+        }
+
+        let (prefix, mut vout_count, mut outputs, suffix) =
+            parse_coinbase_outputs(&template.coinbase)?;
+
+        if outputs.is_empty() {
+            return Err(JdClientError::Protocol(
+                "Template coinbase has no outputs".to_string(),
+            ));
+        }
+
+        outputs[0].script = self.pool_coinbase_output.clone();
+
+        if let Some(address) = &self.miner_payout_address {
+            let miner_script = parse_script_hex(address)?;
+            if !outputs.iter().any(|out| out.script == miner_script) {
+                if outputs[0].value == 0 {
+                    return Err(JdClientError::Protocol(
+                        "Coinbase output value is zero; cannot split miner payout".to_string(),
+                    ));
+                }
+                outputs[0].value -= 1;
+                outputs.push(TxOut {
+                    value: 1,
+                    script: miner_script,
+                });
+                vout_count += 1;
+            }
+        }
+
+        let mut rebuilt = Vec::with_capacity(template.coinbase.len() + self.pool_coinbase_output.len());
+        rebuilt.extend_from_slice(&prefix);
+        write_compact_size(vout_count, &mut rebuilt);
+        for output in outputs {
+            rebuilt.extend_from_slice(&output.value.to_le_bytes());
+            write_compact_size(output.script.len() as u64, &mut rebuilt);
+            rebuilt.extend_from_slice(&output.script);
+        }
+        rebuilt.extend_from_slice(&suffix);
+
+        Ok(rebuilt)
     }
 
     /// Calculate merkle root for a modified coinbase
     ///
     /// For MVP, we use the template's merkle root directly
     /// since we're not modifying the coinbase.
-    pub fn calculate_merkle_root(&self, template: &BlockTemplate, _coinbase: &[u8]) -> [u8; 32] {
-        template.header.merkle_root.0
+    pub fn calculate_merkle_root(
+        &self,
+        template: &BlockTemplate,
+        coinbase: &[u8],
+    ) -> Result<[u8; 32]> {
+        if coinbase == template.coinbase {
+            return Ok(template.header.merkle_root.0);
+        }
+
+        let mut txids = Vec::with_capacity(1 + template.transactions.len());
+        txids.push(compute_txid(coinbase));
+        for tx in &template.transactions {
+            let hash = Hash256::from_hex(&tx.hash).map_err(|e| {
+                JdClientError::Protocol(format!("invalid tx hash: {}", e))
+            })?;
+            txids.push(hash.0);
+        }
+
+        Ok(merkle_root_from_txids(&txids))
     }
 
     /// Get the block commitments hash
@@ -85,6 +154,181 @@ impl TemplateBuilder {
     pub fn miner_payout_address(&self) -> Option<&str> {
         self.miner_payout_address.as_deref()
     }
+}
+
+fn contains_script(coinbase: &[u8], script: &[u8]) -> bool {
+    if script.is_empty() {
+        return true;
+    }
+    coinbase.windows(script.len()).any(|w| w == script)
+}
+
+fn parse_script_hex(address: &str) -> Result<Vec<u8>> {
+    if let Some(hex_script) = address.strip_prefix("hex:") {
+        hex::decode(hex_script)
+            .map_err(|e| JdClientError::Protocol(format!("invalid script hex: {}", e)))
+    } else {
+        Err(JdClientError::Protocol(
+            "miner payout address must be hex:<script>".to_string(),
+        ))
+    }
+}
+
+fn compute_txid(data: &[u8]) -> [u8; 32] {
+    let hash1 = Sha256::digest(data);
+    let hash2 = Sha256::digest(hash1);
+    let mut txid = [0u8; 32];
+    txid.copy_from_slice(&hash2);
+    txid
+}
+
+fn merkle_root_from_txids(txids: &[[u8; 32]]) -> [u8; 32] {
+    if txids.is_empty() {
+        return [0u8; 32];
+    }
+
+    let mut layer: Vec<[u8; 32]> = txids.to_vec();
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut i = 0;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() { layer[i + 1] } else { left };
+            let mut data = [0u8; 64];
+            data[..32].copy_from_slice(&left);
+            data[32..].copy_from_slice(&right);
+            next.push(compute_txid(&data));
+            i += 2;
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
+fn read_compact_size(data: &[u8], cursor: &mut usize) -> Result<u64> {
+    if *cursor >= data.len() {
+        return Err(JdClientError::Protocol("compact size out of bounds".to_string()));
+    }
+    let prefix = data[*cursor];
+    *cursor += 1;
+    match prefix {
+        n @ 0x00..=0xfc => Ok(n as u64),
+        0xfd => {
+            if *cursor + 2 > data.len() {
+                return Err(JdClientError::Protocol("compact size u16 out of bounds".to_string()));
+            }
+            let val = u16::from_le_bytes([data[*cursor], data[*cursor + 1]]) as u64;
+            *cursor += 2;
+            Ok(val)
+        }
+        0xfe => {
+            if *cursor + 4 > data.len() {
+                return Err(JdClientError::Protocol("compact size u32 out of bounds".to_string()));
+            }
+            let val = u32::from_le_bytes([
+                data[*cursor],
+                data[*cursor + 1],
+                data[*cursor + 2],
+                data[*cursor + 3],
+            ]) as u64;
+            *cursor += 4;
+            Ok(val)
+        }
+        0xff => {
+            if *cursor + 8 > data.len() {
+                return Err(JdClientError::Protocol("compact size u64 out of bounds".to_string()));
+            }
+            let val = u64::from_le_bytes([
+                data[*cursor],
+                data[*cursor + 1],
+                data[*cursor + 2],
+                data[*cursor + 3],
+                data[*cursor + 4],
+                data[*cursor + 5],
+                data[*cursor + 6],
+                data[*cursor + 7],
+            ]);
+            *cursor += 8;
+            Ok(val)
+        }
+    }
+}
+
+fn write_compact_size(value: u64, out: &mut Vec<u8>) {
+    if value < 0xfd {
+        out.push(value as u8);
+    } else if value <= 0xffff {
+        out.push(0xfd);
+        out.extend_from_slice(&(value as u16).to_le_bytes());
+    } else if value <= 0xffff_ffff {
+        out.push(0xfe);
+        out.extend_from_slice(&(value as u32).to_le_bytes());
+    } else {
+        out.push(0xff);
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn parse_coinbase_outputs(tx: &[u8]) -> Result<CoinbaseOutputs> {
+    let mut cursor = 0usize;
+    if tx.len() < 4 {
+        return Err(JdClientError::Protocol("coinbase too short".to_string()));
+    }
+    let version = u32::from_le_bytes([tx[0], tx[1], tx[2], tx[3]]);
+    cursor += 4;
+    if (version & 0x8000_0000) != 0 {
+        if cursor + 4 > tx.len() {
+            return Err(JdClientError::Protocol("coinbase missing version group id".to_string()));
+        }
+        cursor += 4;
+    }
+
+    let vin_count = read_compact_size(tx, &mut cursor)?;
+    for _ in 0..vin_count {
+        if cursor + 36 > tx.len() {
+            return Err(JdClientError::Protocol("coinbase input out of bounds".to_string()));
+        }
+        cursor += 36;
+        let script_len = read_compact_size(tx, &mut cursor)? as usize;
+        if cursor + script_len + 4 > tx.len() {
+            return Err(JdClientError::Protocol("coinbase scriptSig out of bounds".to_string()));
+        }
+        cursor += script_len;
+        cursor += 4;
+    }
+
+    let vout_count_offset = cursor;
+    let vout_count = read_compact_size(tx, &mut cursor)?;
+
+    let mut outputs = Vec::with_capacity(vout_count as usize);
+    for _ in 0..vout_count {
+        if cursor + 8 > tx.len() {
+            return Err(JdClientError::Protocol("coinbase output value out of bounds".to_string()));
+        }
+        let value = u64::from_le_bytes([
+            tx[cursor],
+            tx[cursor + 1],
+            tx[cursor + 2],
+            tx[cursor + 3],
+            tx[cursor + 4],
+            tx[cursor + 5],
+            tx[cursor + 6],
+            tx[cursor + 7],
+        ]);
+        cursor += 8;
+
+        let script_len = read_compact_size(tx, &mut cursor)? as usize;
+        if cursor + script_len > tx.len() {
+            return Err(JdClientError::Protocol("coinbase output script out of bounds".to_string()));
+        }
+        let script = tx[cursor..cursor + script_len].to_vec();
+        cursor += script_len;
+        outputs.push(TxOut { value, script });
+    }
+
+    let prefix = tx[..vout_count_offset].to_vec();
+    let suffix = tx[cursor..].to_vec();
+    Ok((prefix, vout_count, outputs, suffix))
 }
 
 #[cfg(test)]

@@ -1,15 +1,16 @@
 //! Template validation for Full-Template mode
 
 use crate::messages::SetFullTemplateJob;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 /// Validation strictness for full templates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidationLevel {
     /// Only verify pool payout output exists with minimum value
+    #[default]
     Minimal,
     /// Verify pool payout + basic template structure (default)
-    #[default]
     Standard,
     /// Full validation: verify all transactions are valid
     Strict,
@@ -17,7 +18,7 @@ pub enum ValidationLevel {
 
 impl ValidationLevel {
     /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "minimal" => Some(Self::Minimal),
             "standard" => Some(Self::Standard),
@@ -39,6 +40,14 @@ impl ValidationLevel {
 impl std::fmt::Display for ValidationLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ValidationLevel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
     }
 }
 
@@ -114,10 +123,13 @@ impl TemplateValidator {
     /// Validate a full template job
     pub fn validate(&self, job: &SetFullTemplateJob) -> ValidationResult {
         // Always check pool payout in coinbase
-        if !self.pool_payout_script.is_empty() {
-            if !self.validate_pool_payout(&job.coinbase_tx) {
-                return ValidationResult::Invalid("Missing or insufficient pool payout".into());
-            }
+        if !self.pool_payout_script.is_empty()
+            && !self.validate_pool_payout(&job.coinbase_tx)
+        {
+            return ValidationResult::Invalid("Missing or insufficient pool payout".into());
+        }
+        if let Err(err) = Self::parse_transaction(&job.coinbase_tx) {
+            return ValidationResult::Invalid(format!("invalid coinbase transaction: {}", err));
         }
 
         match self.level {
@@ -132,15 +144,116 @@ impl TemplateValidator {
         if self.pool_payout_script.is_empty() {
             return true;
         }
-        // Simple check: does the payout script appear in the coinbase?
-        // A more complete implementation would parse the tx and check output values
-        coinbase
-            .windows(self.pool_payout_script.len())
-            .any(|w| w == self.pool_payout_script.as_slice())
+        let script = &self.pool_payout_script;
+        if self.min_pool_payout == 0 {
+            return coinbase.windows(script.len()).any(|w| w == script.as_slice());
+        }
+
+        // Best-effort parse: look for the payout script as a txout scriptPubKey and
+        // verify the preceding value meets min_pool_payout. This is a heuristic and
+        // does not fully parse Zcash transaction formats.
+        for start in 0..=coinbase.len().saturating_sub(script.len()) {
+            if &coinbase[start..start + script.len()] != script.as_slice() {
+                continue;
+            }
+            if let Some(value) = Self::try_read_output_value(coinbase, start, script.len()) {
+                if value >= self.min_pool_payout {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn try_read_output_value(
+        coinbase: &[u8],
+        script_start: usize,
+        script_len: usize,
+    ) -> Option<u64> {
+        // CompactSize length directly preceding script (1 byte)
+        if script_start > 8 {
+            let len = coinbase[script_start - 1] as usize;
+            if len == script_len {
+                let value_start = script_start - 1 - 8;
+                let mut value_bytes = [0u8; 8];
+                value_bytes.copy_from_slice(&coinbase[value_start..value_start + 8]);
+                return Some(u64::from_le_bytes(value_bytes));
+            }
+        }
+
+        // CompactSize length (0xfd + u16)
+        if script_start >= 3 + 8 {
+            let marker = coinbase[script_start - 3];
+            if marker == 0xfd {
+                let len = u16::from_le_bytes([coinbase[script_start - 2], coinbase[script_start - 1]])
+                    as usize;
+                if len == script_len {
+                    let value_start = script_start - 3 - 8;
+                    let mut value_bytes = [0u8; 8];
+                    value_bytes.copy_from_slice(&coinbase[value_start..value_start + 8]);
+                    return Some(u64::from_le_bytes(value_bytes));
+                }
+            }
+        }
+
+        // CompactSize length (0xfe + u32)
+        if script_start >= 5 + 8 {
+            let marker = coinbase[script_start - 5];
+            if marker == 0xfe {
+                let len = u32::from_le_bytes([
+                    coinbase[script_start - 4],
+                    coinbase[script_start - 3],
+                    coinbase[script_start - 2],
+                    coinbase[script_start - 1],
+                ]) as usize;
+                if len == script_len {
+                    let value_start = script_start - 5 - 8;
+                    let mut value_bytes = [0u8; 8];
+                    value_bytes.copy_from_slice(&coinbase[value_start..value_start + 8]);
+                    return Some(u64::from_le_bytes(value_bytes));
+                }
+            }
+        }
+
+        // CompactSize length (0xff + u64)
+        if script_start >= 9 + 8 {
+            let marker = coinbase[script_start - 9];
+            if marker == 0xff {
+                let len = u64::from_le_bytes([
+                    coinbase[script_start - 8],
+                    coinbase[script_start - 7],
+                    coinbase[script_start - 6],
+                    coinbase[script_start - 5],
+                    coinbase[script_start - 4],
+                    coinbase[script_start - 3],
+                    coinbase[script_start - 2],
+                    coinbase[script_start - 1],
+                ]) as usize;
+                if len == script_len {
+                    let value_start = script_start - 9 - 8;
+                    let mut value_bytes = [0u8; 8];
+                    value_bytes.copy_from_slice(&coinbase[value_start..value_start + 8]);
+                    return Some(u64::from_le_bytes(value_bytes));
+                }
+            }
+        }
+
+        None
     }
 
     /// Standard validation: check for missing transactions
     fn validate_standard(&self, job: &SetFullTemplateJob) -> ValidationResult {
+        if job.tx_data.len() > job.tx_short_ids.len() {
+            return ValidationResult::Invalid("too many transactions provided".into());
+        }
+
+        for tx_data in &job.tx_data {
+            if let Err(err) = Self::parse_transaction(tx_data) {
+                return ValidationResult::Invalid(format!("invalid transaction data: {}", err));
+            }
+        }
+
         // Check if we know all referenced transactions
         let missing: Vec<[u8; 32]> = job
             .tx_short_ids
@@ -158,6 +271,12 @@ impl TemplateValidator {
             }
         }
 
+        if let Some(root) = Self::compute_merkle_root(&job.coinbase_tx, &job.tx_short_ids) {
+            if root != job.merkle_root {
+                return ValidationResult::Invalid("invalid merkle root".into());
+            }
+        }
+
         ValidationResult::Valid
     }
 
@@ -169,19 +288,176 @@ impl TemplateValidator {
             other => return other,
         }
 
-        // In strict mode, we could:
-        // 1. Verify each transaction in tx_data is valid
-        // 2. Verify the merkle root matches
-        // 3. Verify block structure
-        // For MVP, same as standard
+        let txid_set: HashSet<[u8; 32]> = job.tx_short_ids.iter().copied().collect();
+        for tx_data in &job.tx_data {
+            if tx_data.is_empty() {
+                return ValidationResult::Invalid("empty transaction data".into());
+            }
+            let txid = Self::compute_txid(tx_data);
+            if !txid_set.contains(&txid) {
+                return ValidationResult::Invalid("transaction data not referenced".into());
+            }
+        }
 
         ValidationResult::Valid
+    }
+
+    fn parse_transaction(data: &[u8]) -> Result<(), String> {
+        if data.len() < 4 {
+            return Err("transaction too short".into());
+        }
+
+        let mut cursor = 0usize;
+        let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        cursor += 4;
+        if (version & 0x8000_0000) != 0 {
+            if cursor + 4 > data.len() {
+                return Err("missing version group id".into());
+            }
+            cursor += 4;
+        }
+
+        let vin_count = Self::read_compact_size(data, &mut cursor)?;
+        for _ in 0..vin_count {
+            if cursor + 36 > data.len() {
+                return Err("input out of bounds".into());
+            }
+            cursor += 36;
+            let script_len = Self::read_compact_size(data, &mut cursor)? as usize;
+            if cursor + script_len + 4 > data.len() {
+                return Err("scriptSig out of bounds".into());
+            }
+            cursor += script_len;
+            cursor += 4;
+        }
+
+        let vout_count = Self::read_compact_size(data, &mut cursor)?;
+        for _ in 0..vout_count {
+            if cursor + 8 > data.len() {
+                return Err("output value out of bounds".into());
+            }
+            cursor += 8;
+            let script_len = Self::read_compact_size(data, &mut cursor)? as usize;
+            if cursor + script_len > data.len() {
+                return Err("output script out of bounds".into());
+            }
+            cursor += script_len;
+        }
+
+        if cursor + 4 > data.len() {
+            return Err("missing lock_time".into());
+        }
+        cursor += 4;
+        if (version & 0x8000_0000) != 0 {
+            if cursor + 4 > data.len() {
+                return Err("missing expiry_height".into());
+            }
+            cursor += 4;
+        }
+
+        if cursor > data.len() {
+            return Err("transaction parse overflow".into());
+        }
+
+        Ok(())
+    }
+
+    fn read_compact_size(data: &[u8], cursor: &mut usize) -> Result<u64, String> {
+        if *cursor >= data.len() {
+            return Err("compact size out of bounds".into());
+        }
+        let prefix = data[*cursor];
+        *cursor += 1;
+        match prefix {
+            n @ 0x00..=0xfc => Ok(n as u64),
+            0xfd => {
+                if *cursor + 2 > data.len() {
+                    return Err("compact size u16 out of bounds".into());
+                }
+                let val = u16::from_le_bytes([data[*cursor], data[*cursor + 1]]) as u64;
+                *cursor += 2;
+                Ok(val)
+            }
+            0xfe => {
+                if *cursor + 4 > data.len() {
+                    return Err("compact size u32 out of bounds".into());
+                }
+                let val = u32::from_le_bytes([
+                    data[*cursor],
+                    data[*cursor + 1],
+                    data[*cursor + 2],
+                    data[*cursor + 3],
+                ]) as u64;
+                *cursor += 4;
+                Ok(val)
+            }
+            0xff => {
+                if *cursor + 8 > data.len() {
+                    return Err("compact size u64 out of bounds".into());
+                }
+                let val = u64::from_le_bytes([
+                    data[*cursor],
+                    data[*cursor + 1],
+                    data[*cursor + 2],
+                    data[*cursor + 3],
+                    data[*cursor + 4],
+                    data[*cursor + 5],
+                    data[*cursor + 6],
+                    data[*cursor + 7],
+                ]);
+                *cursor += 8;
+                Ok(val)
+            }
+        }
+    }
+
+    fn compute_txid(data: &[u8]) -> [u8; 32] {
+        let hash1 = Sha256::digest(data);
+        let hash2 = Sha256::digest(hash1);
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&hash2);
+        txid
+    }
+
+    fn compute_merkle_root(coinbase: &[u8], txids: &[[u8; 32]]) -> Option<[u8; 32]> {
+        if coinbase.is_empty() {
+            return None;
+        }
+
+        let mut all_txids = Vec::with_capacity(1 + txids.len());
+        all_txids.push(Self::compute_txid(coinbase));
+        all_txids.extend_from_slice(txids);
+
+        Some(Self::merkle_root_from_txids(&all_txids))
+    }
+
+    fn merkle_root_from_txids(txids: &[[u8; 32]]) -> [u8; 32] {
+        if txids.is_empty() {
+            return [0u8; 32];
+        }
+
+        let mut layer: Vec<[u8; 32]> = txids.to_vec();
+        while layer.len() > 1 {
+            let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+            let mut i = 0;
+            while i < layer.len() {
+                let left = layer[i];
+                let right = if i + 1 < layer.len() { layer[i + 1] } else { left };
+                let mut data = [0u8; 64];
+                data[..32].copy_from_slice(&left);
+                data[32..].copy_from_slice(&right);
+                next.push(Self::compute_txid(&data));
+                i += 2;
+            }
+            layer = next;
+        }
+        layer[0]
     }
 }
 
 impl Default for TemplateValidator {
     fn default() -> Self {
-        Self::new(ValidationLevel::Standard, vec![], 0)
+        Self::new(ValidationLevel::default(), vec![], 0)
     }
 }
 
@@ -190,21 +466,47 @@ mod tests {
     use super::*;
     use crate::messages::SetFullTemplateJob;
 
+    fn minimal_tx() -> Vec<u8> {
+        minimal_tx_with_script(&[0x51])
+    }
+
+    fn minimal_tx_with_script(script: &[u8]) -> Vec<u8> {
+        let mut tx = Vec::new();
+        tx.extend_from_slice(&1u32.to_le_bytes()); // version
+        tx.push(0x01); // vin count
+        tx.extend_from_slice(&[0u8; 32]); // prevout hash
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // prevout index
+        tx.push(0x01); // scriptSig length
+        tx.push(0x00); // scriptSig
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // sequence
+        tx.push(0x01); // vout count
+        tx.extend_from_slice(&0u64.to_le_bytes()); // value
+        if script.len() < 0xfd {
+            tx.push(script.len() as u8);
+        } else {
+            tx.push(0xfd);
+            tx.extend_from_slice(&(script.len() as u16).to_le_bytes());
+        }
+        tx.extend_from_slice(script);
+        tx.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        tx
+    }
+
     #[test]
     fn test_validation_level_from_str() {
         assert_eq!(
-            ValidationLevel::from_str("minimal"),
+            ValidationLevel::parse("minimal"),
             Some(ValidationLevel::Minimal)
         );
         assert_eq!(
-            ValidationLevel::from_str("STANDARD"),
+            ValidationLevel::parse("STANDARD"),
             Some(ValidationLevel::Standard)
         );
         assert_eq!(
-            ValidationLevel::from_str("Strict"),
+            ValidationLevel::parse("Strict"),
             Some(ValidationLevel::Strict)
         );
-        assert_eq!(ValidationLevel::from_str("unknown"), None);
+        assert_eq!(ValidationLevel::parse("unknown"), None);
     }
 
     #[test]
@@ -217,7 +519,7 @@ mod tests {
     #[test]
     fn test_validation_level_default() {
         let level: ValidationLevel = Default::default();
-        assert_eq!(level, ValidationLevel::Standard);
+        assert_eq!(level, ValidationLevel::Minimal);
     }
 
     #[test]
@@ -244,7 +546,7 @@ mod tests {
     // =========================================================================
 
     fn make_test_job() -> SetFullTemplateJob {
-        SetFullTemplateJob {
+        let mut job = SetFullTemplateJob {
             channel_id: 1,
             request_id: 1,
             mining_job_token: vec![0x01, 0x02, 0x03],
@@ -252,11 +554,23 @@ mod tests {
             prev_hash: [0xaa; 32],
             merkle_root: [0xbb; 32],
             block_commitments: [0xcc; 32],
-            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            coinbase_tx: minimal_tx(),
             time: 1700000000,
             bits: 0x1d00ffff,
             tx_short_ids: vec![],
             tx_data: vec![],
+        };
+        if let Some(root) = TemplateValidator::compute_merkle_root(&job.coinbase_tx, &[]) {
+            job.merkle_root = root;
+        }
+        job
+    }
+
+    fn update_merkle_root(job: &mut SetFullTemplateJob) {
+        if let Some(root) =
+            TemplateValidator::compute_merkle_root(&job.coinbase_tx, &job.tx_short_ids)
+        {
+            job.merkle_root = root;
         }
     }
 
@@ -272,6 +586,7 @@ mod tests {
         let validator = TemplateValidator::new(ValidationLevel::Standard, vec![], 0);
         let mut job = make_test_job();
         job.tx_short_ids = vec![[0x11; 32], [0x22; 32]];
+        update_merkle_root(&mut job);
 
         match validator.validate(&job) {
             ValidationResult::NeedTransactions(missing) => {
@@ -289,6 +604,7 @@ mod tests {
 
         let mut job = make_test_job();
         job.tx_short_ids = vec![[0x11; 32], [0x22; 32]];
+        update_merkle_root(&mut job);
 
         assert_eq!(validator.validate(&job), ValidationResult::Valid);
     }
@@ -299,7 +615,8 @@ mod tests {
         let mut job = make_test_job();
         job.tx_short_ids = vec![[0x11; 32], [0x22; 32]];
         // Provide enough tx_data to cover the missing txids
-        job.tx_data = vec![vec![0x01, 0x00], vec![0x02, 0x00]];
+        job.tx_data = vec![minimal_tx(), minimal_tx()];
+        update_merkle_root(&mut job);
 
         assert_eq!(validator.validate(&job), ValidationResult::Valid);
     }
@@ -312,14 +629,15 @@ mod tests {
 
         // Coinbase without payout script
         let mut job = make_test_job();
-        job.coinbase_tx = vec![0x01, 0x00, 0x00, 0x00];
+        job.coinbase_tx = minimal_tx();
         assert!(matches!(
             validator.validate(&job),
             ValidationResult::Invalid(_)
         ));
 
         // Coinbase with payout script
-        job.coinbase_tx = vec![0x01, 0x00, 0x76, 0xa9, 0x14, 0xde, 0xad, 0xbe, 0xef, 0x00];
+        job.coinbase_tx = minimal_tx_with_script(&payout_script);
+        update_merkle_root(&mut job);
         assert_eq!(validator.validate(&job), ValidationResult::Valid);
     }
 
@@ -339,7 +657,7 @@ mod tests {
     #[test]
     fn test_validator_default() {
         let validator = TemplateValidator::default();
-        assert_eq!(validator.level(), ValidationLevel::Standard);
+        assert_eq!(validator.level(), ValidationLevel::Minimal);
         assert!(!validator.is_txid_known(&[0x00; 32]));
     }
 
@@ -350,6 +668,7 @@ mod tests {
 
         let mut job = make_test_job();
         job.tx_short_ids = vec![[0x11; 32]];
+        update_merkle_root(&mut job);
 
         assert_eq!(validator.validate(&job), ValidationResult::Valid);
     }

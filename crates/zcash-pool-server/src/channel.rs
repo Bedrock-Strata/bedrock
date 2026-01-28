@@ -39,18 +39,31 @@ pub struct ChannelJob {
 }
 
 impl Channel {
-    /// Create a new channel with the given nonce_1 prefix
-    pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
+    /// Reserve and return the next channel id.
+    ///
+    /// Used to generate nonce_1 that matches the channel's id.
+    pub fn next_id() -> u32 {
+        NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Create a new channel with a pre-reserved id and nonce_1 prefix.
+    pub fn new_with_id(id: u32, nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
         assert!(nonce_1.len() <= 32, "nonce_1 length must be ≤ 32 bytes");
         let nonce_2_len = 32 - nonce_1.len() as u8;
         Self {
-            id: NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst),
+            id,
             nonce_1,
             nonce_2_len,
             vardiff: VardiffController::new(vardiff_config),
             jobs: HashMap::with_capacity(10),
             last_job_id: 0,
         }
+    }
+
+    /// Create a new channel with the given nonce_1 prefix.
+    pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
+        let id = Self::next_id();
+        Self::new_with_id(id, nonce_1, vardiff_config)
     }
 
     /// Generate a unique nonce_1 for a channel based on channel ID
@@ -71,13 +84,14 @@ impl Channel {
             }
         }
 
-        self.last_job_id += 1;
+        let job_id = job.job_id;
+        self.last_job_id = self.last_job_id.max(job_id);
         let channel_job = ChannelJob {
-            job_id: self.last_job_id,
+            job_id,
             job,
             active: true,
         };
-        self.jobs.insert(self.last_job_id, channel_job);
+        self.jobs.insert(job_id, channel_job);
 
         // Keep only last 10 jobs to bound memory
         if self.jobs.len() > 10 {
@@ -136,7 +150,7 @@ mod tests {
 
         let job1 = NewEquihashJob {
             channel_id: channel.id,
-            job_id: 0, // Will be replaced
+            job_id: 1,
             future_job: false,
             version: 5,
             prev_hash: [0; 32],
@@ -153,7 +167,12 @@ mod tests {
         channel.add_job(job1.clone(), false);
         assert!(channel.is_job_active(1));
 
-        channel.add_job(job1.clone(), true); // clean_jobs
+        let job2 = NewEquihashJob {
+            job_id: 2,
+            ..job1.clone()
+        };
+
+        channel.add_job(job2, true); // clean_jobs
         assert!(!channel.is_job_active(1)); // Old job now inactive
         assert!(channel.is_job_active(2)); // New job active
     }

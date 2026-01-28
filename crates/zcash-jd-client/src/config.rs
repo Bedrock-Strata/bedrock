@@ -13,7 +13,7 @@ pub enum TxSelectionStrategy {
 }
 
 impl TxSelectionStrategy {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "all" => Some(Self::All),
             "by-fee-rate" | "byfee" | "fee" => Some(Self::ByFeeRate),
@@ -32,6 +32,14 @@ impl TxSelectionStrategy {
 impl std::fmt::Display for TxSelectionStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for TxSelectionStrategy {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
     }
 }
 

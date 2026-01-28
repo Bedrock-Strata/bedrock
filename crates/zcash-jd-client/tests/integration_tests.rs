@@ -204,16 +204,16 @@ fn test_config_socket_addr() {
 #[test]
 fn test_tx_selection_strategy_from_str() {
     // Test valid inputs
-    assert_eq!(TxSelectionStrategy::from_str("all"), Some(TxSelectionStrategy::All));
-    assert_eq!(TxSelectionStrategy::from_str("ALL"), Some(TxSelectionStrategy::All));
-    assert_eq!(TxSelectionStrategy::from_str("by-fee-rate"), Some(TxSelectionStrategy::ByFeeRate));
-    assert_eq!(TxSelectionStrategy::from_str("BY-FEE-RATE"), Some(TxSelectionStrategy::ByFeeRate));
-    assert_eq!(TxSelectionStrategy::from_str("byfee"), Some(TxSelectionStrategy::ByFeeRate));
-    assert_eq!(TxSelectionStrategy::from_str("fee"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::parse("all"), Some(TxSelectionStrategy::All));
+    assert_eq!(TxSelectionStrategy::parse("ALL"), Some(TxSelectionStrategy::All));
+    assert_eq!(TxSelectionStrategy::parse("by-fee-rate"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::parse("BY-FEE-RATE"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::parse("byfee"), Some(TxSelectionStrategy::ByFeeRate));
+    assert_eq!(TxSelectionStrategy::parse("fee"), Some(TxSelectionStrategy::ByFeeRate));
 
     // Test invalid inputs
-    assert_eq!(TxSelectionStrategy::from_str("invalid"), None);
-    assert_eq!(TxSelectionStrategy::from_str(""), None);
+    assert_eq!(TxSelectionStrategy::parse("invalid"), None);
+    assert_eq!(TxSelectionStrategy::parse(""), None);
 }
 
 #[test]

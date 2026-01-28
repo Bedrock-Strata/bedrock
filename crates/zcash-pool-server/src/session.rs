@@ -6,7 +6,6 @@
 //! - Sends jobs and difficulty updates to the miner
 //! - Handles vardiff adjustments
 
-use crate::channel::Channel;
 use crate::error::{PoolError, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write as StdWrite;
@@ -19,6 +18,7 @@ use zcash_mining_protocol::messages::{
     message_types, NewEquihashJob, SetTarget, ShareResult, SubmitEquihashShare,
     SubmitSharesResponse,
 };
+use zcash_stratum_noise::NoiseStream;
 
 /// Messages sent from session to server
 #[derive(Debug)]
@@ -26,7 +26,7 @@ pub enum SessionMessage {
     /// Miner submitted a share
     ShareSubmitted {
         channel_id: u32,
-        share: SubmitEquihashShare,
+        share: Box<SubmitEquihashShare>,
         response_tx: oneshot::Sender<ShareResult>,
     },
     /// Session disconnected
@@ -44,88 +44,72 @@ pub enum ServerMessage {
     Shutdown,
 }
 
+/// Transport for miner connections (plain or Noise-encrypted)
+pub enum Transport {
+    Plain(TcpStream),
+    Noise(NoiseStream<TcpStream>),
+}
+
 /// Session state for a single miner connection
 pub struct Session {
-    /// TCP stream for this connection
-    stream: TcpStream,
-    /// Channel state for this miner
-    channel: Channel,
+    /// Transport for this connection
+    transport: Transport,
+    /// Channel ID for this miner
+    channel_id: u32,
     /// Sender to forward messages to server
     server_tx: mpsc::Sender<SessionMessage>,
     /// Receiver for messages from server
     server_rx: mpsc::Receiver<ServerMessage>,
-    /// Read buffer for incoming messages
+    /// Read buffer for incoming messages (plain transport only)
     read_buf: Vec<u8>,
 }
 
 impl Session {
     /// Create a new session
     pub fn new(
-        stream: TcpStream,
-        channel: Channel,
+        transport: Transport,
+        channel_id: u32,
         server_tx: mpsc::Sender<SessionMessage>,
         server_rx: mpsc::Receiver<ServerMessage>,
     ) -> Self {
         Self {
-            stream,
-            channel,
+            transport,
+            channel_id,
             server_tx,
             server_rx,
             read_buf: Vec::with_capacity(4096),
         }
     }
 
-    /// Get the channel ID for this session
-    pub fn channel_id(&self) -> u32 {
-        self.channel.id
-    }
-
-    /// Get a reference to the channel
-    pub fn channel(&self) -> &Channel {
-        &self.channel
-    }
-
-    /// Get a mutable reference to the channel
-    pub fn channel_mut(&mut self) -> &mut Channel {
-        &mut self.channel
-    }
-
     /// Main session loop
     pub async fn run(mut self) -> Result<()> {
-        info!("Session started for channel {}", self.channel.id);
-        let channel_id = self.channel.id;
+        info!("Session started for channel {}", self.channel_id);
+        let channel_id = self.channel_id;
 
         loop {
-            // Use a temporary buffer for reading
-            let mut temp_buf = [0u8; 1024];
-
+            let read_future = Self::read_next_message(&mut self.transport, &mut self.read_buf);
+            let server_future = self.server_rx.recv();
             tokio::select! {
                 // Read from miner
-                read_result = self.stream.read(&mut temp_buf) => {
+                read_result = read_future => {
                     match read_result {
-                        Ok(0) => {
-                            // Connection closed gracefully
-                            info!("Connection closed for channel {}", channel_id);
-                            break;
-                        }
-                        Ok(n) => {
-                            self.read_buf.extend_from_slice(&temp_buf[..n]);
-
-                            // Try to parse complete messages
-                            match self.try_parse_message() {
-                                Ok(Some(share)) => {
+                        Ok(Some(msg)) => {
+                            match self.decode_share_message(&msg) {
+                                Ok(share) => {
                                     if let Err(e) = self.handle_share(share).await {
                                         warn!("Error handling share: {}", e);
                                     }
-                                }
-                                Ok(None) => {
-                                    // Need more data, continue
                                 }
                                 Err(e) => {
                                     error!("Parse error for channel {}: {}", channel_id, e);
                                     break;
                                 }
                             }
+                        }
+                        Ok(None) => {
+                            // Connection closed
+                            info!("Connection closed for channel {}", channel_id);
+                            break;
                         }
                         Err(e) => {
                             error!("Read error for channel {}: {}", channel_id, e);
@@ -135,7 +119,7 @@ impl Session {
                 }
 
                 // Receive messages from server
-                msg = self.server_rx.recv() => {
+                msg = server_future => {
                     match msg {
                         Some(ServerMessage::NewJob(job)) => {
                             if let Err(e) = self.send_job(job).await {
@@ -174,23 +158,53 @@ impl Session {
         Ok(())
     }
 
+    /// Read the next complete message from the transport
+    async fn read_next_message(
+        transport: &mut Transport,
+        read_buf: &mut Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        match transport {
+            Transport::Noise(noise) => {
+                let msg = noise.read_message().await?;
+                if msg.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(msg))
+            }
+            Transport::Plain(stream) => {
+                loop {
+                    if let Some(msg) = Self::try_parse_message(read_buf)? {
+                        return Ok(Some(msg));
+                    }
+
+                    let mut temp_buf = [0u8; 1024];
+                    let n = stream.read(&mut temp_buf).await?;
+                    if n == 0 {
+                        return Ok(None);
+                    }
+                    read_buf.extend_from_slice(&temp_buf[..n]);
+                }
+            }
+        }
+    }
+
     /// Try to parse a complete message from the read buffer
-    fn try_parse_message(&mut self) -> Result<Option<SubmitEquihashShare>> {
+    fn try_parse_message(read_buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>> {
         // Prevent unbounded buffer growth (64KB max)
         const MAX_BUFFER_SIZE: usize = 65536;
-        if self.read_buf.len() > MAX_BUFFER_SIZE {
+        if read_buf.len() > MAX_BUFFER_SIZE {
             return Err(PoolError::InvalidMessage(
                 "Read buffer exceeded maximum size of 64KB".to_string(),
             ));
         }
 
         // Check if we have enough data for the header
-        if self.read_buf.len() < MessageFrame::HEADER_SIZE {
+        if read_buf.len() < MessageFrame::HEADER_SIZE {
             return Ok(None);
         }
 
         // Parse frame header
-        let frame = MessageFrame::decode(&self.read_buf)
+        let frame = MessageFrame::decode(read_buf)
             .map_err(PoolError::Protocol)?;
 
         // Validate frame size limit (1MB max per message)
@@ -205,30 +219,52 @@ impl Session {
         let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
 
         // Check if we have the complete message
-        if self.read_buf.len() < total_len {
+        if read_buf.len() < total_len {
             return Ok(None);
         }
 
-        // Extract and parse the message
-        let msg_data: Vec<u8> = self.read_buf.drain(..total_len).collect();
+        // Extract message bytes
+        let msg_data: Vec<u8> = read_buf.drain(..total_len).collect();
+        Ok(Some(msg_data))
+    }
 
-        match frame.msg_type {
-            message_types::SUBMIT_EQUIHASH_SHARE => {
-                let share = decode_submit_share(&msg_data)?;
-                debug!(
-                    "Received share: channel={}, job={}, seq={}",
-                    share.channel_id, share.job_id, share.sequence_number
-                );
-                Ok(Some(share))
+    /// Decode a share submission message
+    fn decode_share_message(&self, msg_data: &[u8]) -> Result<SubmitEquihashShare> {
+        let frame = MessageFrame::decode(msg_data).map_err(PoolError::Protocol)?;
+        if frame.msg_type != message_types::SUBMIT_EQUIHASH_SHARE {
+            return Err(PoolError::InvalidMessage(format!(
+                "Unknown message type: 0x{:02x}",
+                frame.msg_type
+            )));
+        }
+
+        let share = decode_submit_share(msg_data)?;
+        if share.channel_id != self.channel_id {
+            return Err(PoolError::InvalidMessage(format!(
+                "Share channel_id {} does not match session {}",
+                share.channel_id, self.channel_id
+            )));
+        }
+        debug!(
+            "Received share: channel={}, job={}, seq={}",
+            share.channel_id, share.job_id, share.sequence_number
+        );
+        Ok(share)
+    }
+
+    /// Write a message to the transport
+    async fn write_message(&mut self, data: &[u8]) -> Result<()> {
+        match &mut self.transport {
+            Transport::Noise(noise) => {
+                noise.write_message(data).await?;
+                noise.flush().await?;
             }
-            _ => {
-                warn!("Unknown message type: 0x{:02x}", frame.msg_type);
-                Err(PoolError::InvalidMessage(format!(
-                    "Unknown message type: 0x{:02x}",
-                    frame.msg_type
-                )))
+            Transport::Plain(stream) => {
+                stream.write_all(data).await?;
+                stream.flush().await?;
             }
         }
+        Ok(())
     }
 
     /// Handle a share submission
@@ -239,8 +275,8 @@ impl Session {
         // Send share to server for validation
         self.server_tx
             .send(SessionMessage::ShareSubmitted {
-                channel_id: self.channel.id,
-                share,
+                channel_id: self.channel_id,
+                share: Box::new(share),
                 response_tx,
             })
             .await
@@ -258,25 +294,17 @@ impl Session {
     /// Send a job to the miner
     async fn send_job(&mut self, mut job: NewEquihashJob) -> Result<()> {
         // Update job with channel-specific info
-        job.channel_id = self.channel.id;
-        job.nonce_1 = self.channel.nonce_1.clone();
-        job.nonce_2_len = self.channel.nonce_2_len;
-        job.target = self.channel.current_target();
-
-        // Add job to channel state
-        let clean_jobs = job.clean_jobs;
-        self.channel.add_job(job.clone(), clean_jobs);
+        job.channel_id = self.channel_id;
 
         // Encode and send
         let encoded = encode_new_equihash_job(&job)
             .map_err(PoolError::Protocol)?;
 
-        self.stream.write_all(&encoded).await?;
-        self.stream.flush().await?;
+        self.write_message(&encoded).await?;
 
         debug!(
             "Sent job {} to channel {} (clean={})",
-            job.job_id, self.channel.id, clean_jobs
+            job.job_id, self.channel_id, job.clean_jobs
         );
 
         Ok(())
@@ -286,16 +314,14 @@ impl Session {
     async fn send_set_target(&mut self, target: [u8; 32]) -> Result<()> {
         // Encode SetTarget message
         let set_target = SetTarget {
-            channel_id: self.channel.id,
+            channel_id: self.channel_id,
             target,
         };
 
         let encoded = encode_set_target(&set_target)?;
+        self.write_message(&encoded).await?;
 
-        self.stream.write_all(&encoded).await?;
-        self.stream.flush().await?;
-
-        debug!("Sent SetTarget to channel {}", self.channel.id);
+        debug!("Sent SetTarget to channel {}", self.channel_id);
 
         Ok(())
     }
@@ -303,19 +329,17 @@ impl Session {
     /// Send a share response to the miner
     async fn send_response(&mut self, sequence_number: u32, result: ShareResult) -> Result<()> {
         let response = SubmitSharesResponse {
-            channel_id: self.channel.id,
+            channel_id: self.channel_id,
             sequence_number,
             result,
         };
 
         let encoded = encode_submit_shares_response(&response)?;
-
-        self.stream.write_all(&encoded).await?;
-        self.stream.flush().await?;
+        self.write_message(&encoded).await?;
 
         debug!(
             "Sent response for seq {} to channel {}",
-            sequence_number, self.channel.id
+            sequence_number, self.channel_id
         );
 
         Ok(())

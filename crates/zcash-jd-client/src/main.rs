@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         noise_enabled: args.noise,
         pool_public_key: args.pool_public_key,
         full_template_mode: args.full_template,
-        tx_selection: TxSelectionStrategy::from_str(&args.tx_selection)
+        tx_selection: TxSelectionStrategy::parse(&args.tx_selection)
             .unwrap_or(TxSelectionStrategy::All),
     };
 

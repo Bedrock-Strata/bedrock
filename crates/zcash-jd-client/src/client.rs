@@ -18,9 +18,62 @@ use tracing::{debug, error, info, warn};
 use zcash_jd_server::codec::*;
 use zcash_jd_server::messages::*;
 use zcash_mining_protocol::codec::MessageFrame;
-use zcash_stratum_noise::{NoiseInitiator, PublicKey};
-use zcash_template_provider::types::BlockTemplate;
+use zcash_stratum_noise::{NoiseInitiator, NoiseStream, PublicKey};
+use zcash_template_provider::types::{BlockTemplate, Hash256};
 use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
+
+enum JdClientTransport {
+    Plain(TcpStream),
+    Noise(NoiseStream<TcpStream>),
+}
+
+impl JdClientTransport {
+    async fn read_full_message(&mut self) -> Result<Option<Vec<u8>>> {
+        match self {
+            JdClientTransport::Plain(stream) => {
+                let mut header_buf = [0u8; MessageFrame::HEADER_SIZE];
+                match stream.read_exact(&mut header_buf).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(JdClientError::Io(e)),
+                }
+
+                let frame = MessageFrame::decode(&header_buf)
+                    .map_err(|e| JdClientError::Protocol(e.to_string()))?;
+                let mut payload = vec![0u8; frame.length as usize];
+                if frame.length > 0 {
+                    stream.read_exact(&mut payload).await?;
+                }
+
+                let mut full_message = header_buf.to_vec();
+                full_message.extend(payload);
+                Ok(Some(full_message))
+            }
+            JdClientTransport::Noise(stream) => match stream.read_message().await {
+                Ok(message) => Ok(Some(message)),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+                Err(e) => Err(JdClientError::Io(e)),
+            },
+        }
+    }
+
+    async fn write_full_message(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            JdClientTransport::Plain(stream) => {
+                stream.write_all(data).await?;
+                stream.flush().await?;
+                Ok(())
+            }
+            JdClientTransport::Noise(stream) => {
+                stream.write_message(data).await?;
+                stream.flush().await?;
+                Ok(())
+            }
+        }
+    }
+}
 
 /// JD Client for declaring custom mining jobs to a pool
 pub struct JdClient {
@@ -39,6 +92,8 @@ pub struct JdClient {
     current_token: Arc<RwLock<Option<Vec<u8>>>>,
     /// Current job ID assigned by the pool
     current_job_id: Arc<RwLock<Option<u32>>>,
+    /// Mode granted by the pool (may differ from requested)
+    granted_mode: Arc<RwLock<JobDeclarationMode>>,
     /// Transaction data cache for Full-Template mode (txid -> raw tx)
     tx_cache: Arc<RwLock<HashMap<[u8; 32], Vec<u8>>>>,
 }
@@ -72,6 +127,7 @@ impl JdClient {
             template_provider: Arc::new(template_provider),
             current_token: Arc::new(RwLock::new(None)),
             current_job_id: Arc::new(RwLock::new(None)),
+            granted_mode: Arc::new(RwLock::new(JobDeclarationMode::CoinbaseOnly)),
             tx_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -94,24 +150,30 @@ impl JdClient {
         info!("Starting JD Client");
 
         // Connect to pool JD Server
-        // TODO: Noise integration - when noise_enabled is true, wrap the connection
-        // if self.config.noise_enabled {
-        //     let public_key = PublicKey::from_hex(
-        //         self.config.pool_public_key.as_ref()
-        //             .ok_or(JdClientError::Protocol("Missing pool public key".into()))?
-        //     ).map_err(|e| JdClientError::Protocol(e.to_string()))?;
-        //
-        //     let tcp_stream = TcpStream::connect(&self.config.pool_jd_addr).await?;
-        //     let initiator = NoiseInitiator::new(public_key);
-        //     let noise_stream = initiator.connect(tcp_stream).await
-        //         .map_err(|e| JdClientError::Protocol(e.to_string()))?;
-        //     // Use noise_stream instead of raw tcp_stream
-        // }
-        let _ = (&NoiseInitiator::new, &PublicKey::from_hex); // Suppress unused import warnings
+        let mut transport = if self.config.noise_enabled {
+            let public_key = PublicKey::from_hex(
+                self.config
+                    .pool_public_key
+                    .as_ref()
+                    .ok_or_else(|| JdClientError::Protocol("Missing pool public key".into()))?,
+            )
+            .map_err(|e| JdClientError::Protocol(e.to_string()))?;
 
-        let mut stream = TcpStream::connect(self.config.pool_jd_addr)
-            .await
-            .map_err(|e| JdClientError::ConnectionFailed(e.to_string()))?;
+            let tcp_stream = TcpStream::connect(&self.config.pool_jd_addr)
+                .await
+                .map_err(|e| JdClientError::ConnectionFailed(e.to_string()))?;
+            let initiator = NoiseInitiator::new(public_key);
+            let noise_stream = initiator
+                .connect(tcp_stream)
+                .await
+                .map_err(|e| JdClientError::Protocol(e.to_string()))?;
+            JdClientTransport::Noise(noise_stream)
+        } else {
+            let tcp_stream = TcpStream::connect(self.config.pool_jd_addr)
+                .await
+                .map_err(|e| JdClientError::ConnectionFailed(e.to_string()))?;
+            JdClientTransport::Plain(tcp_stream)
+        };
 
         info!(
             "Connected to pool JD Server at {}",
@@ -119,7 +181,7 @@ impl JdClient {
         );
 
         // Allocate initial token
-        self.allocate_token(&mut stream).await?;
+        self.allocate_token(&mut transport).await?;
 
         // Subscribe to template updates
         let mut template_rx = self.template_provider.subscribe();
@@ -140,7 +202,7 @@ impl JdClient {
                 template_result = template_rx.recv() => {
                     match template_result {
                         Ok(template) => {
-                            if let Err(e) = self.handle_new_template(&mut stream, template).await {
+                            if let Err(e) = self.handle_new_template(&mut transport, template).await {
                                 error!("Template handling error: {}", e);
                             }
                         }
@@ -154,28 +216,27 @@ impl JdClient {
     }
 
     /// Allocate a mining job token from the pool
-    async fn allocate_token(&self, stream: &mut TcpStream) -> Result<()> {
+    async fn allocate_token(&self, transport: &mut JdClientTransport) -> Result<()> {
         let request = AllocateMiningJobToken {
             request_id: 1,
             user_identifier: self.config.user_identifier.clone(),
-            // Default to CoinbaseOnly mode for now (Full-Template support in future phase)
-            requested_mode: zcash_jd_server::JobDeclarationMode::CoinbaseOnly,
+            requested_mode: if self.config.full_template_mode {
+                JobDeclarationMode::FullTemplate
+            } else {
+                JobDeclarationMode::CoinbaseOnly
+            },
         };
 
         let encoded = encode_allocate_token(&request)?;
-        stream.write_all(&encoded).await?;
+        transport.write_full_message(&encoded).await?;
         debug!("Sent AllocateMiningJobToken request");
 
-        // Read response header
-        let mut header_buf = [0u8; MessageFrame::HEADER_SIZE];
-        stream.read_exact(&mut header_buf).await?;
-
-        let frame = MessageFrame::decode(&header_buf)
+        let full_message = transport
+            .read_full_message()
+            .await?
+            .ok_or_else(|| JdClientError::Protocol("JD server disconnected".to_string()))?;
+        let frame = MessageFrame::decode(&full_message)
             .map_err(|e| JdClientError::Protocol(e.to_string()))?;
-
-        // Read payload
-        let mut payload = vec![0u8; frame.length as usize];
-        stream.read_exact(&mut payload).await?;
 
         if frame.msg_type != message_types::ALLOCATE_MINING_JOB_TOKEN_SUCCESS {
             return Err(JdClientError::TokenAllocationFailed(format!(
@@ -184,17 +245,27 @@ impl JdClient {
             )));
         }
 
-        // Reconstruct full message for decoding (header + payload)
-        let mut full_message = header_buf.to_vec();
-        full_message.extend(&payload);
-
         let response = decode_allocate_token_success(&full_message)?;
 
         info!(
-            "Token allocated: {} bytes, coinbase output: {} bytes",
+            "Token allocated: {} bytes, coinbase output: {} bytes (granted mode: {})",
             response.mining_job_token.len(),
-            response.coinbase_output.len()
+            response.coinbase_output.len(),
+            response.granted_mode
         );
+
+        // Update granted mode
+        {
+            let mut mode = self.granted_mode.write().await;
+            *mode = response.granted_mode;
+        }
+
+        if self.config.full_template_mode && response.granted_mode != JobDeclarationMode::FullTemplate {
+            warn!(
+                "Full-Template mode requested but not granted; falling back to {}",
+                response.granted_mode
+            );
+        }
 
         // Update template builder with pool requirements
         {
@@ -217,7 +288,7 @@ impl JdClient {
     /// Handle a new template from Zebra
     async fn handle_new_template(
         &self,
-        stream: &mut TcpStream,
+        transport: &mut JdClientTransport,
         template: BlockTemplate,
     ) -> Result<()> {
         let token = {
@@ -227,19 +298,33 @@ impl JdClient {
                 .ok_or_else(|| JdClientError::Protocol("No token allocated".to_string()))?
         };
 
+        let granted_mode = *self.granted_mode.read().await;
+        match granted_mode {
+            JobDeclarationMode::FullTemplate => {
+                self.handle_full_template_job(transport, template, token).await
+            }
+            _ => self.handle_coinbase_only_job(transport, template, token).await,
+        }
+    }
+
+    async fn handle_coinbase_only_job(
+        &self,
+        transport: &mut JdClientTransport,
+        template: BlockTemplate,
+        token: Vec<u8>,
+    ) -> Result<()> {
         let builder = self.template_builder.read().await;
 
         let coinbase = builder.build_coinbase(&template)?;
-        let merkle_root = builder.calculate_merkle_root(&template, &coinbase);
+        let merkle_root = builder.calculate_merkle_root(&template, &coinbase)?;
         let block_commitments = builder.block_commitments(&template);
 
         debug!(
-            "Declaring job for height {} with {} byte coinbase",
+            "Declaring Coinbase-Only job for height {} with {} byte coinbase",
             template.height,
             coinbase.len()
         );
 
-        // Declare job
         let request = SetCustomMiningJob {
             channel_id: 1,
             request_id: template.height as u32,
@@ -254,22 +339,14 @@ impl JdClient {
         };
 
         let encoded = encode_set_custom_job(&request)?;
-        stream.write_all(&encoded).await?;
+        transport.write_full_message(&encoded).await?;
 
-        // Read response header
-        let mut header_buf = [0u8; MessageFrame::HEADER_SIZE];
-        stream.read_exact(&mut header_buf).await?;
-
-        let frame = MessageFrame::decode(&header_buf)
+        let full_message = transport
+            .read_full_message()
+            .await?
+            .ok_or_else(|| JdClientError::Protocol("JD server disconnected".to_string()))?;
+        let frame = MessageFrame::decode(&full_message)
             .map_err(|e| JdClientError::Protocol(e.to_string()))?;
-
-        // Read payload
-        let mut payload = vec![0u8; frame.length as usize];
-        stream.read_exact(&mut payload).await?;
-
-        // Reconstruct full message for decoding
-        let mut full_message = header_buf.to_vec();
-        full_message.extend(&payload);
 
         match frame.msg_type {
             message_types::SET_CUSTOM_MINING_JOB_SUCCESS => {
@@ -289,10 +366,9 @@ impl JdClient {
                     error.error_code, error.error_message
                 );
 
-                // If token expired, try to get a new one
                 if error.error_code == SetCustomMiningJobErrorCode::TokenExpired {
                     info!("Token expired, requesting new token");
-                    self.allocate_token(stream).await?;
+                    self.allocate_token(transport).await?;
                 }
 
                 return Err(JdClientError::JobRejected(error.error_message));
@@ -306,6 +382,121 @@ impl JdClient {
         }
 
         Ok(())
+    }
+
+    async fn handle_full_template_job(
+        &self,
+        transport: &mut JdClientTransport,
+        template: BlockTemplate,
+        token: Vec<u8>,
+    ) -> Result<()> {
+        let builder = self.template_builder.read().await;
+        let full_builder = self.full_template_builder.as_ref().ok_or_else(|| {
+            JdClientError::Protocol("Full-Template mode enabled but builder missing".to_string())
+        })?;
+
+        let coinbase = builder.build_coinbase(&template)?;
+        let merkle_root = builder.calculate_merkle_root(&template, &coinbase)?;
+        let block_commitments = builder.block_commitments(&template);
+
+        let transactions = self.extract_template_transactions(&template)?;
+        self.cache_transactions(transactions.clone()).await;
+
+        debug!(
+            "Declaring Full-Template job for height {} with {} transactions",
+            template.height,
+            transactions.len()
+        );
+
+        let request = full_builder.build_job(
+            1,
+            template.height as u32,
+            token.clone(),
+            template.header.version,
+            template.header.prev_hash.0,
+            merkle_root,
+            block_commitments,
+            coinbase,
+            template.header.time,
+            template.header.bits,
+            transactions,
+        )?;
+
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let encoded = encode_set_full_template_job(&request)?;
+            transport.write_full_message(&encoded).await?;
+
+            let full_message = transport
+                .read_full_message()
+                .await?
+                .ok_or_else(|| JdClientError::Protocol("JD server disconnected".to_string()))?;
+            let frame = MessageFrame::decode(&full_message)
+                .map_err(|e| JdClientError::Protocol(e.to_string()))?;
+
+            match frame.msg_type {
+                message_types::SET_FULL_TEMPLATE_JOB_SUCCESS => {
+                    let response = decode_set_full_template_job_success(&full_message)?;
+                    info!(
+                        "Full-Template job declared: job_id={}, height={}",
+                        response.job_id, template.height
+                    );
+                    let mut job_id = self.current_job_id.write().await;
+                    *job_id = Some(response.job_id);
+                    return Ok(());
+                }
+                message_types::SET_FULL_TEMPLATE_JOB_ERROR => {
+                    let error = decode_set_full_template_job_error(&full_message)?;
+                    warn!(
+                        "Full-Template job rejected: {:?} - {}",
+                        error.error_code, error.error_message
+                    );
+
+                    if error.error_code == SetFullTemplateJobErrorCode::TokenExpired {
+                        info!("Token expired, requesting new token");
+                        self.allocate_token(transport).await?;
+                    }
+
+                    return Err(JdClientError::JobRejected(error.error_message));
+                }
+                message_types::GET_MISSING_TRANSACTIONS => {
+                    if attempt > 1 {
+                        return Err(JdClientError::Protocol(
+                            "Server requested missing transactions multiple times".to_string(),
+                        ));
+                    }
+
+                    let request = decode_get_missing_transactions(&full_message)?;
+                    let response = self.handle_get_missing_transactions(request).await;
+                    let encoded = encode_provide_missing_transactions(&response)?;
+                    transport.write_full_message(&encoded).await?;
+                    // Re-submit the job after providing transactions.
+                    continue;
+                }
+                _ => {
+                    return Err(JdClientError::Protocol(format!(
+                        "Unexpected message type: 0x{:02x}",
+                        frame.msg_type
+                    )));
+                }
+            }
+        }
+    }
+
+    fn extract_template_transactions(
+        &self,
+        template: &BlockTemplate,
+    ) -> Result<Vec<([u8; 32], Vec<u8>)>> {
+        let mut transactions = Vec::with_capacity(template.transactions.len());
+        for tx in &template.transactions {
+            let txid = Hash256::from_hex(&tx.hash)
+                .map_err(|e| JdClientError::Protocol(format!("invalid tx hash: {}", e)))?;
+            let data = hex::decode(&tx.data)
+                .map_err(|e| JdClientError::Protocol(format!("invalid tx data: {}", e)))?;
+            transactions.push((txid.0, data));
+        }
+        Ok(transactions)
     }
 
     /// Get the current job ID

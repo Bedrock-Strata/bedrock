@@ -16,8 +16,6 @@ const MAX_MESSAGE_SIZE: usize = 65535 - 16; // 16 bytes for AEAD tag
 pub struct NoiseStream<S> {
     inner: S,
     transport: Mutex<TransportState>,
-    read_buffer: Vec<u8>,
-    read_pos: usize,
 }
 
 impl<S> NoiseStream<S> {
@@ -26,8 +24,6 @@ impl<S> NoiseStream<S> {
         Self {
             inner,
             transport: Mutex::new(transport),
-            read_buffer: Vec::new(),
-            read_pos: 0,
         }
     }
 

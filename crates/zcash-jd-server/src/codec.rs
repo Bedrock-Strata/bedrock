@@ -21,6 +21,31 @@ use zcash_mining_protocol::codec::MessageFrame;
 /// Extension type for JD protocol (0 for standard)
 const JD_EXTENSION_TYPE: u16 = 0;
 
+fn frame_payload(data: &[u8], expected_type: u8) -> Result<&[u8]> {
+    let frame = MessageFrame::decode(data)
+        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
+    if frame.msg_type != expected_type {
+        return Err(JdServerError::Protocol(format!(
+            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
+            expected_type, frame.msg_type
+        )));
+    }
+
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(JdServerError::Protocol(format!(
+            "Message too short: expected {}, got {}",
+            total_len,
+            data.len()
+        )));
+    }
+    if data.len() > total_len {
+        return Err(JdServerError::Protocol("trailing bytes in message".into()));
+    }
+
+    Ok(&data[MessageFrame::HEADER_SIZE..total_len])
+}
+
 /// Helper to read a u16-prefixed string
 fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<String> {
     let len = cursor
@@ -104,17 +129,7 @@ pub fn encode_allocate_token(msg: &AllocateMiningJobToken) -> Result<Vec<u8>> {
 
 /// Decode an AllocateMiningJobToken message
 pub fn decode_allocate_token(data: &[u8]) -> Result<AllocateMiningJobToken> {
-    let frame = MessageFrame::decode(data)
-        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::ALLOCATE_MINING_JOB_TOKEN {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::ALLOCATE_MINING_JOB_TOKEN,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::ALLOCATE_MINING_JOB_TOKEN)?;
     let mut cursor = Cursor::new(payload);
 
     let request_id = cursor
@@ -165,17 +180,7 @@ pub fn encode_allocate_token_success(msg: &AllocateMiningJobTokenSuccess) -> Res
 
 /// Decode an AllocateMiningJobTokenSuccess message
 pub fn decode_allocate_token_success(data: &[u8]) -> Result<AllocateMiningJobTokenSuccess> {
-    let frame = MessageFrame::decode(data)
-        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::ALLOCATE_MINING_JOB_TOKEN_SUCCESS {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::ALLOCATE_MINING_JOB_TOKEN_SUCCESS,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::ALLOCATE_MINING_JOB_TOKEN_SUCCESS)?;
     let mut cursor = Cursor::new(payload);
 
     let request_id = cursor
@@ -235,17 +240,7 @@ pub fn encode_set_custom_job(msg: &SetCustomMiningJob) -> Result<Vec<u8>> {
 
 /// Decode a SetCustomMiningJob message
 pub fn decode_set_custom_job(data: &[u8]) -> Result<SetCustomMiningJob> {
-    let frame = MessageFrame::decode(data)
-        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::SET_CUSTOM_MINING_JOB {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::SET_CUSTOM_MINING_JOB,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::SET_CUSTOM_MINING_JOB)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -317,17 +312,7 @@ pub fn encode_set_custom_job_success(msg: &SetCustomMiningJobSuccess) -> Result<
 
 /// Decode a SetCustomMiningJobSuccess message
 pub fn decode_set_custom_job_success(data: &[u8]) -> Result<SetCustomMiningJobSuccess> {
-    let frame = MessageFrame::decode(data)
-        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::SET_CUSTOM_MINING_JOB_SUCCESS {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::SET_CUSTOM_MINING_JOB_SUCCESS,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::SET_CUSTOM_MINING_JOB_SUCCESS)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -369,17 +354,7 @@ pub fn encode_set_custom_job_error(msg: &SetCustomMiningJobError) -> Result<Vec<
 
 /// Decode a SetCustomMiningJobError message
 pub fn decode_set_custom_job_error(data: &[u8]) -> Result<SetCustomMiningJobError> {
-    let frame = MessageFrame::decode(data)
-        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::SET_CUSTOM_MINING_JOB_ERROR {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::SET_CUSTOM_MINING_JOB_ERROR,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::SET_CUSTOM_MINING_JOB_ERROR)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -427,17 +402,7 @@ pub fn encode_push_solution(msg: &PushSolution) -> Result<Vec<u8>> {
 
 /// Decode a PushSolution message
 pub fn decode_push_solution(data: &[u8]) -> Result<PushSolution> {
-    let frame = MessageFrame::decode(data)
-        .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::PUSH_SOLUTION {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::PUSH_SOLUTION,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::PUSH_SOLUTION)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -556,17 +521,7 @@ pub fn encode_set_full_template_job(msg: &SetFullTemplateJob) -> Result<Vec<u8>>
 
 /// Decode a SetFullTemplateJob message
 pub fn decode_set_full_template_job(data: &[u8]) -> Result<SetFullTemplateJob> {
-    let frame =
-        MessageFrame::decode(data).map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::SET_FULL_TEMPLATE_JOB {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::SET_FULL_TEMPLATE_JOB,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::SET_FULL_TEMPLATE_JOB)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -642,17 +597,7 @@ pub fn encode_set_full_template_job_success(msg: &SetFullTemplateJobSuccess) -> 
 
 /// Decode a SetFullTemplateJobSuccess message
 pub fn decode_set_full_template_job_success(data: &[u8]) -> Result<SetFullTemplateJobSuccess> {
-    let frame =
-        MessageFrame::decode(data).map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::SET_FULL_TEMPLATE_JOB_SUCCESS {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::SET_FULL_TEMPLATE_JOB_SUCCESS,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::SET_FULL_TEMPLATE_JOB_SUCCESS)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -694,17 +639,7 @@ pub fn encode_set_full_template_job_error(msg: &SetFullTemplateJobError) -> Resu
 
 /// Decode a SetFullTemplateJobError message
 pub fn decode_set_full_template_job_error(data: &[u8]) -> Result<SetFullTemplateJobError> {
-    let frame =
-        MessageFrame::decode(data).map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::SET_FULL_TEMPLATE_JOB_ERROR {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::SET_FULL_TEMPLATE_JOB_ERROR,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::SET_FULL_TEMPLATE_JOB_ERROR)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -750,17 +685,7 @@ pub fn encode_get_missing_transactions(msg: &GetMissingTransactions) -> Result<V
 
 /// Decode a GetMissingTransactions message
 pub fn decode_get_missing_transactions(data: &[u8]) -> Result<GetMissingTransactions> {
-    let frame =
-        MessageFrame::decode(data).map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::GET_MISSING_TRANSACTIONS {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::GET_MISSING_TRANSACTIONS,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::GET_MISSING_TRANSACTIONS)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor
@@ -799,17 +724,7 @@ pub fn encode_provide_missing_transactions(msg: &ProvideMissingTransactions) -> 
 
 /// Decode a ProvideMissingTransactions message
 pub fn decode_provide_missing_transactions(data: &[u8]) -> Result<ProvideMissingTransactions> {
-    let frame =
-        MessageFrame::decode(data).map_err(|e| JdServerError::Protocol(e.to_string()))?;
-    if frame.msg_type != message_types::PROVIDE_MISSING_TRANSACTIONS {
-        return Err(JdServerError::Protocol(format!(
-            "Invalid message type: expected 0x{:02x}, got 0x{:02x}",
-            message_types::PROVIDE_MISSING_TRANSACTIONS,
-            frame.msg_type
-        )));
-    }
-
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let payload = frame_payload(data, message_types::PROVIDE_MISSING_TRANSACTIONS)?;
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor

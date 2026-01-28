@@ -1,6 +1,7 @@
 //! Test vectors from Zcash mainnet/testnet blocks
 
 /// A test vector containing a valid Equihash solution
+#[allow(dead_code)]
 pub struct TestVector {
     pub name: &'static str,
     pub header_hex: &'static str,
@@ -10,6 +11,7 @@ pub struct TestVector {
 
 /// Zcash mainnet block test vectors
 /// These are real blocks from the Zcash blockchain
+#[allow(dead_code)]
 pub const TEST_VECTORS: &[TestVector] = &[
     // Genesis block (simplified - real genesis has different structure)
     // For actual testing, use blocks from after NU5 activation

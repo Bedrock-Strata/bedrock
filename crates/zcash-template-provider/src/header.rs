@@ -1,5 +1,6 @@
 //! Zcash block header assembly for Equihash mining
 
+use crate::commitments::calculate_block_commitments_hash;
 use crate::error::{Error, Result};
 use crate::types::{EquihashHeader, GetBlockTemplateResponse, Hash256};
 
@@ -17,8 +18,18 @@ pub fn assemble_header(template: &GetBlockTemplateResponse) -> Result<EquihashHe
     let merkle_root = Hash256::from_hex(&template.default_roots.merkle_root)
         .map_err(|e| Error::InvalidTemplate(format!("invalid merkle_root: {}", e)))?;
 
-    let hash_block_commitments = Hash256::from_hex(&template.default_roots.block_commitments_hash)
-        .map_err(|e| Error::InvalidTemplate(format!("invalid block_commitments_hash: {}", e)))?;
+    let hash_block_commitments = match (
+        Hash256::from_hex(&template.default_roots.chain_history_root),
+        Hash256::from_hex(&template.default_roots.auth_data_root),
+    ) {
+        (Ok(history_root), Ok(auth_root)) => {
+            calculate_block_commitments_hash(&history_root, &auth_root)
+        }
+        _ => {
+            Hash256::from_hex(&template.default_roots.block_commitments_hash)
+                .map_err(|e| Error::InvalidTemplate(format!("invalid block_commitments_hash: {}", e)))?
+        }
+    };
 
     let bits = u32::from_str_radix(&template.bits, 16)
         .map_err(|e| Error::InvalidTemplate(format!("invalid bits: {}", e)))?;

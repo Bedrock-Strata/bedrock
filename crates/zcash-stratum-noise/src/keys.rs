@@ -27,7 +27,7 @@ impl PublicKey {
 
     /// Convert to hex string
     pub fn to_hex(&self) -> String {
-        hex::encode(&self.0)
+        hex::encode(self.0)
     }
 
     /// Get raw bytes
@@ -96,7 +96,7 @@ impl Keypair {
 
     /// Export private key as hex (for config storage)
     pub fn private_hex(&self) -> String {
-        hex::encode(&self.private)
+        hex::encode(self.private)
     }
 
     /// Get private key bytes (for snow)

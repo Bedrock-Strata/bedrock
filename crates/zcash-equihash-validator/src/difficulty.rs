@@ -20,8 +20,8 @@ impl Target {
         self.0
     }
 
-    /// Maximum target (difficulty 1)
-    pub fn max() -> Self {
+    /// Maximum target for Zcash mainnet (difficulty 1)
+    pub fn max_mainnet() -> Self {
         // Zcash's powLimit for mainnet
         // 0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
         let mut target = [0xff; 32];
@@ -30,6 +30,11 @@ impl Target {
         target[30] = 0x00;
         target[31] = 0x00;
         Self(target)
+    }
+
+    /// Maximum target from a little-endian 256-bit pow limit
+    pub fn max_from_le_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     /// Check if a hash meets this target (hash <= target)
@@ -107,11 +112,9 @@ pub fn compact_to_target(compact: u32) -> Target {
 /// Convert target to difficulty
 ///
 /// Difficulty = max_target / target
-pub fn target_to_difficulty(target: &Target) -> f64 {
-    let max = Target::max();
-
+pub fn target_to_difficulty_with_max(target: &Target, max: &Target) -> f64 {
     // Convert to f64 for division (approximate but sufficient for display)
-    let max_val = target_to_f64(&max);
+    let max_val = target_to_f64(max);
     let target_val = target_to_f64(target);
 
     if target_val == 0.0 {
@@ -121,19 +124,28 @@ pub fn target_to_difficulty(target: &Target) -> f64 {
     max_val / target_val
 }
 
+/// Convert target to difficulty using mainnet powLimit
+pub fn target_to_difficulty(target: &Target) -> f64 {
+    target_to_difficulty_with_max(target, &Target::max_mainnet())
+}
+
 /// Convert difficulty to target
 ///
 /// Target = max_target / difficulty
-pub fn difficulty_to_target(difficulty: f64) -> Target {
+pub fn difficulty_to_target_with_max(difficulty: f64, max: &Target) -> Target {
     if difficulty <= 0.0 {
-        return Target::max();
+        return *max;
     }
 
-    let max = Target::max();
-    let max_val = target_to_f64(&max);
+    let max_val = target_to_f64(max);
     let target_val = max_val / difficulty;
 
     f64_to_target(target_val)
+}
+
+/// Convert difficulty to target using mainnet powLimit
+pub fn difficulty_to_target(difficulty: f64) -> Target {
+    difficulty_to_target_with_max(difficulty, &Target::max_mainnet())
 }
 
 /// Convert target to approximate f64 (loses precision for very large values)
@@ -148,10 +160,10 @@ fn target_to_f64(target: &Target) -> f64 {
 /// Convert f64 to target (approximate)
 fn f64_to_target(mut value: f64) -> Target {
     let mut target = [0u8; 32];
-    for i in 0..32 {
-        let byte = (value % 256.0) as u8;
-        target[i] = byte;
-        value = (value - byte as f64) / 256.0;
+    for out in &mut target {
+        let value_byte = (value % 256.0) as u8;
+        *out = value_byte;
+        value = (value - value_byte as f64) / 256.0;
     }
     Target(target)
 }

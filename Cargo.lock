@@ -2581,6 +2581,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",
@@ -2627,6 +2628,7 @@ name = "zcash-pool-server"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "hex",
  "rustc-hash",
  "serde",
  "thiserror",

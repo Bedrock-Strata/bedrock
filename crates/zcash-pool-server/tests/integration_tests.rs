@@ -311,7 +311,7 @@ fn test_channel_job_management() {
     // Create test job
     let job = NewEquihashJob {
         channel_id: channel.id,
-        job_id: 0,
+        job_id: 1,
         future_job: false,
         version: 5,
         prev_hash: [0; 32],
@@ -331,12 +331,14 @@ fn test_channel_job_management() {
     assert!(!channel.is_job_active(999)); // Unknown job
 
     // Add another job without clean
-    channel.add_job(job.clone(), false);
+    let job2 = NewEquihashJob { job_id: 2, ..job.clone() };
+    channel.add_job(job2, false);
     assert!(channel.is_job_active(1)); // Still active
     assert!(channel.is_job_active(2)); // New job also active
 
     // Add job with clean_jobs = true
-    channel.add_job(job.clone(), true);
+    let job3 = NewEquihashJob { job_id: 3, ..job.clone() };
+    channel.add_job(job3, true);
     assert!(!channel.is_job_active(1)); // Old job now stale
     assert!(!channel.is_job_active(2)); // Old job now stale
     assert!(channel.is_job_active(3)); // Only new job active

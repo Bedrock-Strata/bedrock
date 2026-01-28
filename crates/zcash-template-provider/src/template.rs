@@ -68,6 +68,11 @@ impl TemplateProvider {
         self.process_template(response)
     }
 
+    /// Submit a solved block to Zebra
+    pub async fn submit_block(&self, block_hex: &str) -> Result<Option<String>> {
+        self.rpc.submit_block(block_hex).await
+    }
+
     /// Process a getblocktemplate response into a BlockTemplate
     fn process_template(&self, response: GetBlockTemplateResponse) -> Result<BlockTemplate> {
         let header = assemble_header(&response)?;
@@ -100,7 +105,7 @@ impl TemplateProvider {
     /// Start the polling loop (call this in a spawned task)
     pub async fn run(&self) -> Result<()> {
         let mut poll_interval = interval(Duration::from_millis(self.config.poll_interval_ms));
-        let mut last_prev_hash = String::new();
+        let mut last_fingerprint: Option<String> = None;
 
         info!(
             "Template provider starting, polling {} every {}ms",
@@ -112,9 +117,20 @@ impl TemplateProvider {
 
             match self.rpc.get_block_template().await {
                 Ok(response) => {
-                    // Only process if prev_hash changed (new block found)
-                    if response.previous_block_hash != last_prev_hash {
-                        last_prev_hash = response.previous_block_hash.clone();
+                    let fingerprint = format!(
+                        "{}:{}:{}:{}:{}:{}:{}:{}",
+                        response.previous_block_hash,
+                        response.height,
+                        response.default_roots.merkle_root,
+                        response.default_roots.block_commitments_hash,
+                        response.bits,
+                        response.cur_time,
+                        response.target,
+                        response.transactions.len(),
+                    );
+
+                    if last_fingerprint.as_deref() != Some(&fingerprint) {
+                        last_fingerprint = Some(fingerprint);
 
                         match self.process_template(response) {
                             Ok(template) => {

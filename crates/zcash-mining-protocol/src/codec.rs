@@ -97,7 +97,18 @@ pub fn decode_new_equihash_job(data: &[u8]) -> Result<NewEquihashJob> {
         return Err(ProtocolError::InvalidMessageType(frame.msg_type));
     }
 
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(ProtocolError::MessageTooShort {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+    if data.len() > total_len {
+        return Err(ProtocolError::EncodingError("trailing bytes in message".into()));
+    }
+
+    let payload = &data[MessageFrame::HEADER_SIZE..total_len];
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor.read_u32::<LittleEndian>().map_err(|e| {
@@ -204,7 +215,18 @@ pub fn decode_submit_share(data: &[u8]) -> Result<SubmitEquihashShare> {
         return Err(ProtocolError::InvalidMessageType(frame.msg_type));
     }
 
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(ProtocolError::MessageTooShort {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+    if data.len() > total_len {
+        return Err(ProtocolError::EncodingError("trailing bytes in message".into()));
+    }
+
+    let payload = &data[MessageFrame::HEADER_SIZE..total_len];
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor.read_u32::<LittleEndian>().map_err(|e| {

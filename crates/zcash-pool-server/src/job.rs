@@ -67,6 +67,11 @@ impl JobDistributor {
     pub fn has_template(&self) -> bool {
         self.current_template.is_some()
     }
+
+    /// Get a clone of the current template
+    pub fn current_template(&self) -> Option<BlockTemplate> {
+        self.current_template.clone()
+    }
 }
 
 impl Default for JobDistributor {

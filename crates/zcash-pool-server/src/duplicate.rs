@@ -54,7 +54,7 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
         let hash = Self::hash_share(nonce_2, solution);
 
         let mut jobs = self.jobs.write().unwrap();
-        let shares = jobs.entry(job_id).or_insert_with(FxHashSet::default);
+        let shares = jobs.entry(job_id).or_default();
 
         // insert returns true if the value was NOT present
         // So we return the opposite: true if it IS a duplicate

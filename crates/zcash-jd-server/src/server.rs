@@ -28,6 +28,7 @@ use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, error, info, warn};
 use zcash_mining_protocol::codec::MessageFrame;
 use zcash_pool_common::PayoutTracker;
+use zcash_stratum_noise::NoiseStream;
 
 /// JD Server embedded in pool
 ///
@@ -577,6 +578,62 @@ pub enum FullTemplateJobResponse {
     NeedTransactions(GetMissingTransactions),
 }
 
+/// JD transport abstraction for plain or Noise-encrypted streams.
+pub enum JdTransport {
+    Plain(TcpStream),
+    Noise(NoiseStream<TcpStream>),
+}
+
+impl JdTransport {
+    async fn read_full_message(&mut self) -> Result<Option<Vec<u8>>> {
+        match self {
+            JdTransport::Plain(stream) => {
+                let mut header_buf = [0u8; MessageFrame::HEADER_SIZE];
+                match stream.read_exact(&mut header_buf).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(JdServerError::Io(e)),
+                }
+
+                let frame =
+                    MessageFrame::decode(&header_buf).map_err(|e| JdServerError::Protocol(e.to_string()))?;
+                let mut payload = vec![0u8; frame.length as usize];
+                if frame.length > 0 {
+                    stream.read_exact(&mut payload).await?;
+                }
+
+                let mut full_message = header_buf.to_vec();
+                full_message.extend(payload);
+                Ok(Some(full_message))
+            }
+            JdTransport::Noise(stream) => {
+                match stream.read_message().await {
+                    Ok(message) => Ok(Some(message)),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+                    Err(e) => Err(JdServerError::Io(e)),
+                }
+            }
+        }
+    }
+
+    async fn write_full_message(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            JdTransport::Plain(stream) => {
+                stream.write_all(data).await?;
+                stream.flush().await?;
+                Ok(())
+            }
+            JdTransport::Noise(stream) => {
+                stream.write_message(data).await?;
+                stream.flush().await?;
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Handle a JD client connection
 ///
 /// This function reads frames from the TCP stream, parses message types,
@@ -584,68 +641,41 @@ pub enum FullTemplateJobResponse {
 ///
 /// # Noise Protocol Support
 ///
-/// When `noise_enabled` is true in the server config, this function should
-/// perform the Noise NK handshake before processing messages. The integration
-/// would involve:
-///
-/// 1. Use `zcash_stratum_noise::NoiseResponder` for the server side
-/// 2. Perform handshake: `let mut noise_stream = responder.handshake(stream).await?`
-/// 3. Use `noise_stream` (which implements AsyncRead + AsyncWrite) for all I/O
-///
-/// TODO: Refactor this function to be generic over `AsyncRead + AsyncWrite + Unpin`
-/// to support both plain TCP and Noise-encrypted streams. Example signature:
-/// ```ignore
-/// pub async fn handle_jd_client<S>(
-///     mut stream: S,
-///     jd_server: Arc<JdServer>,
-///     client_id: String,
-/// ) -> Result<()>
-/// where
-///     S: AsyncRead + AsyncWrite + Unpin,
-/// ```
+/// When `noise_enabled` is true in the server config, callers should perform
+/// the Noise NK handshake and pass a `JdTransport::Noise` into
+/// `handle_jd_client_with_transport`.
 pub async fn handle_jd_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     jd_server: Arc<JdServer>,
     client_id: String,
 ) -> Result<()> {
-    // TODO: When noise_enabled is true in config, wrap `stream` with Noise:
-    // if jd_server.config().noise_enabled {
-    //     let responder = NoiseResponder::new(server_static_keypair);
-    //     let noise_stream = responder.handshake(stream).await?;
-    //     return handle_jd_client_inner(noise_stream, jd_server, client_id).await;
-    // }
+    handle_jd_client_with_transport(JdTransport::Plain(stream), jd_server, client_id).await
+}
 
+/// Handle a JD client connection using a transport abstraction.
+pub async fn handle_jd_client_with_transport(
+    mut transport: JdTransport,
+    jd_server: Arc<JdServer>,
+    client_id: String,
+) -> Result<()> {
     info!(client_id, "JD client connected");
 
-    let mut header_buf = [0u8; MessageFrame::HEADER_SIZE];
-
     loop {
-        // Read frame header
-        match stream.read_exact(&mut header_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        let full_message = match transport.read_full_message().await {
+            Ok(Some(message)) => message,
+            Ok(None) => {
                 info!(client_id, "JD client disconnected");
                 return Ok(());
             }
             Err(e) => {
                 error!(client_id, error = %e, "Error reading from JD client");
-                return Err(JdServerError::Io(e));
+                return Err(e);
             }
-        }
+        };
 
         // Parse frame header
-        let frame = MessageFrame::decode(&header_buf)
+        let frame = MessageFrame::decode(&full_message)
             .map_err(|e| JdServerError::Protocol(e.to_string()))?;
-
-        // Read payload
-        let mut payload = vec![0u8; frame.length as usize];
-        if frame.length > 0 {
-            stream.read_exact(&mut payload).await?;
-        }
-
-        // Combine header and payload for decoding
-        let mut full_message = header_buf.to_vec();
-        full_message.extend(payload);
 
         // Dispatch based on message type
         match frame.msg_type {
@@ -666,8 +696,7 @@ pub async fn handle_jd_client(
                 ) {
                     Ok(response) => {
                         let encoded = encode_allocate_token_success(&response)?;
-                        stream.write_all(&encoded).await?;
-                        stream.flush().await?;
+                        transport.write_full_message(&encoded).await?;
                     }
                     Err(e) => {
                         error!(
@@ -693,13 +722,11 @@ pub async fn handle_jd_client(
                 match jd_server.handle_declare_job(request).await {
                     Ok(response) => {
                         let encoded = encode_set_custom_job_success(&response)?;
-                        stream.write_all(&encoded).await?;
-                        stream.flush().await?;
+                        transport.write_full_message(&encoded).await?;
                     }
                     Err(error) => {
                         let encoded = encode_set_custom_job_error(&error)?;
-                        stream.write_all(&encoded).await?;
-                        stream.flush().await?;
+                        transport.write_full_message(&encoded).await?;
                     }
                 }
             }
@@ -736,18 +763,15 @@ pub async fn handle_jd_client(
                 match jd_server.handle_set_full_template_job(request).await {
                     Ok(response) => {
                         let encoded = encode_set_full_template_job_success(&response)?;
-                        stream.write_all(&encoded).await?;
-                        stream.flush().await?;
+                        transport.write_full_message(&encoded).await?;
                     }
                     Err(FullTemplateJobResponse::Error(error)) => {
                         let encoded = encode_set_full_template_job_error(&error)?;
-                        stream.write_all(&encoded).await?;
-                        stream.flush().await?;
+                        transport.write_full_message(&encoded).await?;
                     }
                     Err(FullTemplateJobResponse::NeedTransactions(request)) => {
                         let encoded = encode_get_missing_transactions(&request)?;
-                        stream.write_all(&encoded).await?;
-                        stream.flush().await?;
+                        transport.write_full_message(&encoded).await?;
                     }
                 }
             }
@@ -1124,15 +1148,17 @@ mod tests {
         assert_eq!(token_response.granted_mode, JobDeclarationMode::FullTemplate);
 
         // Declare a full template job
+        let coinbase_tx = minimal_tx();
+        let merkle_root = merkle_root_for(&coinbase_tx, &[]);
         let job_request = SetFullTemplateJob {
             channel_id: 1,
             request_id: 2,
             mining_job_token: token_response.mining_job_token,
             version: 5,
             prev_hash,
-            merkle_root: [0xbb; 32],
+            merkle_root,
             block_commitments: [0xcc; 32],
-            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            coinbase_tx,
             time: 1700000000,
             bits: 0x1d00ffff,
             tx_short_ids: vec![], // Empty for simplicity
@@ -1161,15 +1187,17 @@ mod tests {
         assert_eq!(token_response.granted_mode, JobDeclarationMode::CoinbaseOnly);
 
         // Try to declare a full template job with CoinbaseOnly token
+        let coinbase_tx = minimal_tx();
+        let merkle_root = merkle_root_for(&coinbase_tx, &[]);
         let job_request = SetFullTemplateJob {
             channel_id: 1,
             request_id: 2,
             mining_job_token: token_response.mining_job_token,
             version: 5,
             prev_hash: [0xaa; 32],
-            merkle_root: [0xbb; 32],
+            merkle_root,
             block_commitments: [0xcc; 32],
-            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            coinbase_tx,
             time: 1700000000,
             bits: 0x1d00ffff,
             tx_short_ids: vec![],
@@ -1185,6 +1213,61 @@ mod tests {
             }
             _ => panic!("Expected ModeMismatch error"),
         }
+    }
+
+    fn minimal_tx() -> Vec<u8> {
+        let mut tx = Vec::new();
+        tx.extend_from_slice(&1u32.to_le_bytes()); // version
+        tx.push(0x01); // vin count
+        tx.extend_from_slice(&[0u8; 32]); // prevout hash
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // prevout index
+        tx.push(0x01); // scriptSig length
+        tx.push(0x00); // scriptSig
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // sequence
+        tx.push(0x01); // vout count
+        tx.extend_from_slice(&0u64.to_le_bytes()); // value
+        tx.push(0x01); // script len
+        tx.push(0x51); // script
+        tx.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        tx
+    }
+
+    fn merkle_root_for(coinbase: &[u8], txids: &[[u8; 32]]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        fn compute_txid(data: &[u8]) -> [u8; 32] {
+            let hash1 = Sha256::digest(data);
+            let hash2 = Sha256::digest(hash1);
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(&hash2);
+            txid
+        }
+
+        if coinbase.is_empty() {
+            return [0u8; 32];
+        }
+
+        let mut all_txids = Vec::with_capacity(1 + txids.len());
+        all_txids.push(compute_txid(coinbase));
+        all_txids.extend_from_slice(txids);
+
+        let mut layer = all_txids;
+        while layer.len() > 1 {
+            let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+            let mut i = 0;
+            while i < layer.len() {
+                let left = layer[i];
+                let right = if i + 1 < layer.len() { layer[i + 1] } else { left };
+                let mut data = [0u8; 64];
+                data[..32].copy_from_slice(&left);
+                data[32..].copy_from_slice(&right);
+                next.push(compute_txid(&data));
+                i += 2;
+            }
+            layer = next;
+        }
+
+        layer[0]
     }
 
     #[tokio::test]
@@ -1203,15 +1286,17 @@ mod tests {
             .unwrap();
 
         // Try to declare a job with a stale prev_hash
+        let coinbase_tx = minimal_tx();
+        let merkle_root = merkle_root_for(&coinbase_tx, &[]);
         let job_request = SetFullTemplateJob {
             channel_id: 1,
             request_id: 2,
             mining_job_token: token_response.mining_job_token,
             version: 5,
             prev_hash: [0x11; 32], // Different from current
-            merkle_root: [0xbb; 32],
+            merkle_root,
             block_commitments: [0xcc; 32],
-            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            coinbase_tx,
             time: 1700000000,
             bits: 0x1d00ffff,
             tx_short_ids: vec![],
@@ -1246,15 +1331,17 @@ mod tests {
 
         // Declare a job with unknown txids (validator doesn't know them)
         let unknown_txid = [0x11; 32];
+        let coinbase_tx = minimal_tx();
+        let merkle_root = merkle_root_for(&coinbase_tx, &[unknown_txid]);
         let job_request = SetFullTemplateJob {
             channel_id: 1,
             request_id: 2,
             mining_job_token: token_response.mining_job_token,
             version: 5,
             prev_hash,
-            merkle_root: [0xbb; 32],
+            merkle_root,
             block_commitments: [0xcc; 32],
-            coinbase_tx: vec![0x01, 0x00, 0x00, 0x00],
+            coinbase_tx,
             time: 1700000000,
             bits: 0x1d00ffff,
             tx_short_ids: vec![unknown_txid],

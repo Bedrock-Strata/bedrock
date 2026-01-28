@@ -7,7 +7,8 @@ use crate::duplicate::DuplicateDetector;
 use crate::error::{PoolError, Result};
 use tracing::{debug, warn};
 use zcash_equihash_validator::EquihashValidator;
-use zcash_mining_protocol::messages::{RejectReason, ShareResult, SubmitEquihashShare};
+use zcash_equihash_validator::difficulty::{Target, target_to_difficulty};
+use zcash_mining_protocol::messages::{NewEquihashJob, RejectReason, ShareResult, SubmitEquihashShare};
 
 /// Result of share validation
 #[derive(Debug)]
@@ -58,7 +59,18 @@ impl ShareProcessor {
             });
         }
 
-        // 2. Check for duplicate
+        self.validate_share_with_job(share, &channel_job.job, duplicate_detector, block_target)
+    }
+
+    /// Validate a submitted share given the job data
+    pub fn validate_share_with_job<D: DuplicateDetector>(
+        &self,
+        share: &SubmitEquihashShare,
+        job: &NewEquihashJob,
+        duplicate_detector: &D,
+        block_target: &[u8; 32],
+    ) -> Result<ShareValidationResult> {
+        // 1. Check for duplicate
         if duplicate_detector.check_and_record(share.job_id, &share.nonce_2, &share.solution) {
             debug!("Duplicate share for job {}", share.job_id);
             return Ok(ShareValidationResult {
@@ -69,8 +81,7 @@ impl ShareProcessor {
             });
         }
 
-        // 3. Build full nonce and header
-        let job = &channel_job.job;
+        // 2. Build full nonce and header
         let full_nonce = job.build_nonce(&share.nonce_2).ok_or_else(|| {
             PoolError::InvalidMessage("Invalid nonce_2 length".to_string())
         })?;
@@ -79,7 +90,7 @@ impl ShareProcessor {
         // Update time if miner changed it
         header[100..104].copy_from_slice(&share.time.to_le_bytes());
 
-        // 4. Verify Equihash solution
+        // 3. Verify Equihash solution
         if let Err(e) = self.validator.verify_solution(&header, &share.solution) {
             debug!("Invalid solution: {}", e);
             return Ok(ShareValidationResult {
@@ -90,7 +101,7 @@ impl ShareProcessor {
             });
         }
 
-        // 5. Check share meets pool target
+        // 4. Check share meets pool target
         let share_target = &job.target;
         match self.validator.verify_share(&header, &share.solution, share_target) {
             Ok(hash) => {
@@ -126,17 +137,10 @@ impl ShareProcessor {
 
     /// Convert hash to difficulty
     fn hash_to_difficulty(&self, hash: &[u8; 32]) -> f64 {
-        // Simplified: count leading zero bits and estimate
-        let mut leading_zeros = 0u32;
-        for &byte in hash.iter().rev() {
-            if byte == 0 {
-                leading_zeros += 8;
-            } else {
-                leading_zeros += byte.leading_zeros();
-                break;
-            }
-        }
-        2.0f64.powi(leading_zeros as i32)
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(hash);
+        let target = Target::from_le_bytes(bytes);
+        target_to_difficulty(&target)
     }
 
     /// Check if hash meets target
@@ -173,10 +177,10 @@ mod tests {
         let diff = processor.hash_to_difficulty(&hash_zeros);
         assert!(diff > 1e70); // Very high
 
-        // All 0xff = minimum difficulty
+        // All 0xff = very low difficulty
         let hash_ones = [0xff; 32];
         let diff = processor.hash_to_difficulty(&hash_ones);
-        assert_eq!(diff, 1.0);
+        assert!(diff < 1.0);
     }
 
     #[test]

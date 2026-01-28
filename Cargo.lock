@@ -2599,6 +2599,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "hex",
+ "rand",
  "serde",
  "sha2",
  "thiserror",

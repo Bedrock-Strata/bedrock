@@ -3,6 +3,7 @@
 use crate::config::JdServerConfig;
 use crate::error::{JdServerError, Result};
 use crate::messages::JobDeclarationMode;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -75,16 +76,30 @@ impl TokenManager {
         client_id: &str,
         granted_mode: JobDeclarationMode,
     ) -> Result<MiningJobToken> {
-        let counter = self.token_counter.fetch_add(1, Ordering::SeqCst);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // Check rate limit: max tokens per client
+        {
+            let tokens = self.tokens.read().unwrap_or_else(|e| e.into_inner());
+            let client_token_count = tokens
+                .values()
+                .filter(|t| t.client_id == client_id && !t.is_expired())
+                .count();
+            if client_token_count >= self.config.max_tokens_per_client as usize {
+                return Err(JdServerError::Protocol(format!(
+                    "Max tokens per client exceeded ({})",
+                    self.config.max_tokens_per_client
+                )));
+            }
+        }
 
-        // Generate token: 8 bytes counter + 8 bytes timestamp
-        let mut token = Vec::with_capacity(16);
+        let counter = self.token_counter.fetch_add(1, Ordering::SeqCst);
+
+        // Generate token: 8 bytes counter + 16 bytes cryptographic randomness
+        // This prevents token forgery even if counter/timestamp are guessed
+        let mut token = Vec::with_capacity(24);
         token.extend_from_slice(&counter.to_le_bytes());
-        token.extend_from_slice(&timestamp.to_le_bytes());
+        let mut random_bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut random_bytes);
+        token.extend_from_slice(&random_bytes);
 
         let mining_token = MiningJobToken {
             token: token.clone(),
@@ -95,9 +110,9 @@ impl TokenManager {
             job_info: None,
         };
 
-        // Store token
+        // Store token (handle poisoned lock gracefully)
         {
-            let mut tokens = self.tokens.write().unwrap();
+            let mut tokens = self.tokens.write().unwrap_or_else(|e| e.into_inner());
             tokens.insert(token, mining_token.clone());
         }
 
@@ -109,7 +124,7 @@ impl TokenManager {
 
     /// Validate a token and return its info
     pub fn validate_token(&self, token: &[u8]) -> Result<MiningJobToken> {
-        let tokens = self.tokens.read().unwrap();
+        let tokens = self.tokens.read().unwrap_or_else(|e| e.into_inner());
         let mining_token = tokens.get(token).ok_or(JdServerError::InvalidToken)?;
 
         if mining_token.is_expired() {
@@ -121,7 +136,7 @@ impl TokenManager {
 
     /// Associate a declared job with a token
     pub fn set_job_info(&self, token: &[u8], job_info: DeclaredJobInfo) -> Result<()> {
-        let mut tokens = self.tokens.write().unwrap();
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| e.into_inner());
         let mining_token = tokens.get_mut(token).ok_or(JdServerError::InvalidToken)?;
 
         if mining_token.is_expired() {
@@ -134,7 +149,7 @@ impl TokenManager {
 
     /// Get job info for a token
     pub fn get_job_info(&self, token: &[u8]) -> Result<DeclaredJobInfo> {
-        let tokens = self.tokens.read().unwrap();
+        let tokens = self.tokens.read().unwrap_or_else(|e| e.into_inner());
         let mining_token = tokens.get(token).ok_or(JdServerError::InvalidToken)?;
 
         mining_token
@@ -145,7 +160,7 @@ impl TokenManager {
 
     /// Remove expired tokens
     fn cleanup_expired(&self) {
-        let mut tokens = self.tokens.write().unwrap();
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| e.into_inner());
         tokens.retain(|_, t| !t.is_expired());
     }
 
@@ -175,7 +190,8 @@ mod tests {
         let token = manager.allocate_token("miner-01").unwrap();
         assert!(!token.is_expired());
         assert_eq!(token.client_id, "miner-01");
-        assert_eq!(token.token.len(), 16);
+        // 8 bytes counter + 16 bytes random = 24 bytes
+        assert_eq!(token.token.len(), 24);
         // Default allocation should be CoinbaseOnly mode
         assert_eq!(token.granted_mode, JobDeclarationMode::CoinbaseOnly);
     }
@@ -250,5 +266,39 @@ mod tests {
 
         let retrieved = manager.get_job_info(&token.token).unwrap();
         assert_eq!(retrieved.job_id, 42);
+    }
+
+    #[test]
+    fn test_token_rate_limiting() {
+        let mut config = JdServerConfig::default();
+        config.max_tokens_per_client = 3;
+        let manager = TokenManager::new(config);
+
+        // Should succeed: tokens 1, 2, 3
+        manager.allocate_token("miner-01").unwrap();
+        manager.allocate_token("miner-01").unwrap();
+        manager.allocate_token("miner-01").unwrap();
+
+        // Should fail: exceeds max_tokens_per_client
+        let result = manager.allocate_token("miner-01");
+        assert!(result.is_err());
+
+        // Different client should still work
+        manager.allocate_token("miner-02").unwrap();
+    }
+
+    #[test]
+    fn test_token_uniqueness() {
+        let config = JdServerConfig::default();
+        let manager = TokenManager::new(config);
+
+        // Allocate multiple tokens and verify they're all unique
+        let token1 = manager.allocate_token("miner-01").unwrap();
+        let token2 = manager.allocate_token("miner-01").unwrap();
+        let token3 = manager.allocate_token("miner-02").unwrap();
+
+        assert_ne!(token1.token, token2.token);
+        assert_ne!(token2.token, token3.token);
+        assert_ne!(token1.token, token3.token);
     }
 }

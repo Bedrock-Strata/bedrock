@@ -43,7 +43,8 @@ impl PayoutTracker {
 
     /// Record a share for a miner
     pub fn record_share(&self, miner_id: &MinerId, difficulty: f64) {
-        let mut miners = self.miners.write().unwrap();
+        // Handle poisoned lock gracefully - continue operating even if another thread panicked
+        let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
         let stats = miners.entry(miner_id.clone()).or_default();
 
         stats.total_shares += 1;
@@ -55,19 +56,19 @@ impl PayoutTracker {
 
     /// Get statistics for a miner
     pub fn get_stats(&self, miner_id: &MinerId) -> Option<MinerStats> {
-        let miners = self.miners.read().unwrap();
+        let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());
         miners.get(miner_id).cloned()
     }
 
     /// Get all miner statistics
     pub fn get_all_stats(&self) -> HashMap<MinerId, MinerStats> {
-        let miners = self.miners.read().unwrap();
+        let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());
         miners.clone()
     }
 
     /// Reset window statistics (call periodically)
     pub fn reset_window(&self) {
-        let mut miners = self.miners.write().unwrap();
+        let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
         for stats in miners.values_mut() {
             stats.window_shares = 0;
             stats.window_difficulty = 0.0;
@@ -76,7 +77,7 @@ impl PayoutTracker {
 
     /// Get total pool hashrate estimate (based on difficulty sum over window)
     pub fn estimate_pool_hashrate(&self) -> f64 {
-        let miners = self.miners.read().unwrap();
+        let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());
         let total_difficulty: f64 = miners.values().map(|s| s.window_difficulty).sum();
 
         // Hashrate = difficulty / time (simplified)
@@ -85,7 +86,7 @@ impl PayoutTracker {
 
     /// Number of active miners (submitted share in window)
     pub fn active_miner_count(&self) -> usize {
-        let miners = self.miners.read().unwrap();
+        let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());
         let cutoff = Instant::now() - self.window_duration;
         miners
             .values()

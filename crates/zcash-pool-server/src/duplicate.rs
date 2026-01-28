@@ -37,8 +37,9 @@ impl InMemoryDuplicateDetector {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
         nonce_2.hash(&mut hasher);
-        // Only hash first 64 bytes of solution for speed (enough for uniqueness)
-        solution[..64.min(solution.len())].hash(&mut hasher);
+        // Hash the full solution to prevent collision attacks
+        // FxHasher is fast enough that hashing 1344 bytes is negligible
+        solution.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -53,7 +54,8 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
     fn check_and_record(&self, job_id: u32, nonce_2: &[u8], solution: &[u8]) -> bool {
         let hash = Self::hash_share(nonce_2, solution);
 
-        let mut jobs = self.jobs.write().unwrap();
+        // Handle poisoned lock gracefully - continue operating even if another thread panicked
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| e.into_inner());
         let shares = jobs.entry(job_id).or_default();
 
         // insert returns true if the value was NOT present
@@ -62,12 +64,12 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
     }
 
     fn clear_job(&self, job_id: u32) {
-        let mut jobs = self.jobs.write().unwrap();
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| e.into_inner());
         jobs.remove(&job_id);
     }
 
     fn clear_all(&self) {
-        let mut jobs = self.jobs.write().unwrap();
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| e.into_inner());
         jobs.clear();
     }
 }

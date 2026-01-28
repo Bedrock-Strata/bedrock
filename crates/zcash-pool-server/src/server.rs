@@ -645,6 +645,42 @@ impl PoolServer {
                             share.job_id,
                             self.job_distributor.read().await.current_height()
                         );
+
+                        // Announce to fiber relay BEFORE submitting to Zebra
+                        // This gives the relay network a head start
+                        if let Some(ref fiber) = self.fiber_relay {
+                            let header = job.build_header(&job.build_nonce(&share.nonce_2).unwrap_or_default());
+                            let tx_hashes: Vec<[u8; 32]> = {
+                                let distributor = self.job_distributor.read().await;
+                                distributor.current_template()
+                                    .map(|t| t.transactions.iter()
+                                        .filter_map(|tx| {
+                                            let bytes = hex::decode(&tx.hash).ok()?;
+                                            if bytes.len() == 32 {
+                                                let mut arr = [0u8; 32];
+                                                arr.copy_from_slice(&bytes);
+                                                arr.reverse();
+                                                Some(arr)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect())
+                                    .unwrap_or_default()
+                            };
+
+                            let fiber = Arc::clone(fiber);
+                            let template = self.job_distributor.read().await.current_template();
+                            if let Some(tmpl) = template {
+                                let coinbase = tmpl.coinbase.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = fiber.announce_block(&header, &coinbase, &tx_hashes).await {
+                                        warn!("Failed to announce block to fiber relay: {}", e);
+                                    }
+                                });
+                            }
+                        }
+
                         if let Err(e) = self.submit_block(&job, &share).await {
                             warn!("Failed to submit block for job {}: {}", share.job_id, e);
                         }

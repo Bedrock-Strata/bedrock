@@ -613,17 +613,32 @@ pub struct ChannelJob {
 }
 
 impl Channel {
-    /// Create a new channel with the given nonce_1 prefix
-    pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
+    /// Reserve and return the next channel id.
+    ///
+    /// Used to generate nonce_1 that matches the channel's id.
+    pub fn next_id() -> u32 {
+        NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Create a new channel with a pre-reserved id and nonce_1 prefix.
+    pub fn new_with_id(id: u32, nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
         let nonce_2_len = 32 - nonce_1.len() as u8;
         Self {
-            id: NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst),
+            id,
             nonce_1,
             nonce_2_len,
             vardiff: VardiffController::new(vardiff_config),
             jobs: HashMap::new(),
             last_job_id: 0,
         }
+    }
+
+    /// Create a new channel with the given nonce_1 prefix.
+    ///
+    /// Note: use new_with_id when the nonce_1 must encode the channel id.
+    pub fn new(nonce_1: Vec<u8>, vardiff_config: VardiffConfig) -> Self {
+        let id = Self::next_id();
+        Self::new_with_id(id, nonce_1, vardiff_config)
     }
 
     /// Generate a unique nonce_1 for a channel based on channel ID
@@ -758,7 +773,7 @@ Create `crates/zcash-pool-server/src/job.rs`:
 
 use crate::channel::Channel;
 use zcash_mining_protocol::messages::NewEquihashJob;
-use zcash_template_provider::template::BlockTemplate;
+use zcash_template_provider::types::{BlockTemplate, Hash256};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Global job ID counter (unique across all channels)
@@ -769,7 +784,7 @@ pub struct JobDistributor {
     /// Current template
     current_template: Option<BlockTemplate>,
     /// Previous block hash (to detect new blocks)
-    prev_hash: Option<[u8; 32]>,
+    prev_hash: Option<Hash256>,
 }
 
 impl JobDistributor {
@@ -783,9 +798,10 @@ impl JobDistributor {
     /// Update the current template
     /// Returns true if this is a new block (clean_jobs should be set)
     pub fn update_template(&mut self, template: BlockTemplate) -> bool {
-        let is_new_block = self.prev_hash.as_ref() != Some(&template.prev_hash);
+        let prev_hash = template.header.prev_hash;
+        let is_new_block = self.prev_hash.as_ref() != Some(&prev_hash);
 
-        self.prev_hash = Some(template.prev_hash);
+        self.prev_hash = Some(prev_hash);
         self.current_template = Some(template);
 
         is_new_block
@@ -799,21 +815,21 @@ impl JobDistributor {
             channel_id: channel.id,
             job_id: NEXT_GLOBAL_JOB_ID.fetch_add(1, Ordering::SeqCst),
             future_job: false,
-            version: template.version,
-            prev_hash: template.prev_hash,
-            merkle_root: template.merkle_root,
-            block_commitments: template.block_commitments,
+            version: template.header.version,
+            prev_hash: *template.header.prev_hash.as_bytes(),
+            merkle_root: *template.header.merkle_root.as_bytes(),
+            block_commitments: *template.header.hash_block_commitments.as_bytes(),
             nonce_1: channel.nonce_1.clone(),
             nonce_2_len: channel.nonce_2_len,
-            time: template.time,
-            bits: template.bits,
+            time: template.header.time,
+            bits: template.header.bits,
             target: channel.current_target(),
             clean_jobs,
         })
     }
 
     /// Get current template height
-    pub fn current_height(&self) -> Option<u32> {
+    pub fn current_height(&self) -> Option<u64> {
         self.current_template.as_ref().map(|t| t.height)
     }
 
@@ -833,19 +849,25 @@ impl Default for JobDistributor {
 mod tests {
     use super::*;
     use zcash_equihash_validator::VardiffConfig;
+    use zcash_template_provider::types::{EquihashHeader, TemplateTransaction};
 
-    fn make_template(height: u32, prev_hash: [u8; 32]) -> BlockTemplate {
+    fn make_template(height: u64, prev_hash: [u8; 32]) -> BlockTemplate {
         BlockTemplate {
+            template_id: 1,
             height,
-            prev_hash,
-            merkle_root: [0xaa; 32],
-            block_commitments: [0xbb; 32],
-            time: 1700000000,
-            bits: 0x1d00ffff,
-            version: 5,
-            transactions: vec![],
-            coinbase_tx: vec![],
-            target: "0000000000000000000000000000000000000000000000000000000000ffffff".to_string(),
+            header: EquihashHeader {
+                version: 5,
+                prev_hash: Hash256(prev_hash),
+                merkle_root: Hash256([0xaa; 32]),
+                hash_block_commitments: Hash256([0xbb; 32]),
+                time: 1700000000,
+                bits: 0x1d00ffff,
+                nonce: [0u8; 32],
+            },
+            target: Hash256([0x00; 32]),
+            transactions: Vec::<TemplateTransaction>::new(),
+            coinbase: vec![],
+            total_fees: 0,
         }
     }
 
@@ -907,6 +929,7 @@ use crate::channel::Channel;
 use crate::duplicate::DuplicateDetector;
 use crate::error::{PoolError, Result};
 use zcash_equihash_validator::EquihashValidator;
+use zcash_equihash_validator::difficulty::{Target, target_to_difficulty};
 use zcash_mining_protocol::messages::{SubmitEquihashShare, ShareResult, RejectReason};
 use tracing::{debug, warn};
 
@@ -1027,17 +1050,10 @@ impl ShareProcessor {
 
     /// Convert hash to difficulty
     fn hash_to_difficulty(&self, hash: &[u8; 32]) -> f64 {
-        // Simplified: count leading zero bits and estimate
-        let mut leading_zeros = 0u32;
-        for &byte in hash.iter().rev() {
-            if byte == 0 {
-                leading_zeros += 8;
-            } else {
-                leading_zeros += byte.leading_zeros();
-                break;
-            }
-        }
-        2.0f64.powi(leading_zeros as i32)
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(hash);
+        let target = Target::from_le_bytes(bytes);
+        target_to_difficulty(&target)
     }
 
     /// Check if hash meets target
@@ -1074,10 +1090,10 @@ mod tests {
         let diff = processor.hash_to_difficulty(&hash_zeros);
         assert!(diff > 1e70); // Very high
 
-        // All 0xff = minimum difficulty
+        // All 0xff = very low difficulty
         let hash_ones = [0xff; 32];
         let diff = processor.hash_to_difficulty(&hash_ones);
-        assert_eq!(diff, 1.0);
+        assert!(diff < 1.0);
     }
 
     #[test]
@@ -1177,14 +1193,9 @@ impl Session {
         server_tx: mpsc::Sender<SessionMessage>,
         server_rx: mpsc::Receiver<ServerMessage>,
     ) -> Self {
-        let channel_id = {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-            NEXT_ID.fetch_add(1, Ordering::SeqCst)
-        };
-
+        let channel_id = Channel::next_id();
         let nonce_1 = Channel::generate_nonce_1(channel_id, nonce_1_len);
-        let channel = Channel::new(nonce_1, vardiff_config);
+        let channel = Channel::new_with_id(channel_id, nonce_1, vardiff_config);
 
         Self {
             stream,
@@ -1531,7 +1542,7 @@ impl PoolServer {
     }
 
     /// Handle a new template from the template provider
-    async fn handle_new_template(&self, template: zcash_template_provider::template::BlockTemplate) {
+    async fn handle_new_template(&self, template: zcash_template_provider::types::BlockTemplate) {
         let clean_jobs = {
             let mut distributor = self.job_distributor.write().await;
             distributor.update_template(template)
@@ -1556,7 +1567,7 @@ impl PoolServer {
             // Create a placeholder channel for job creation
             // In production, we'd store channel state server-side
             let nonce_1 = Channel::generate_nonce_1(channel_id, self.config.nonce_1_len);
-            let temp_channel = Channel::new(nonce_1, VardiffConfig::default());
+            let temp_channel = Channel::new_with_id(channel_id, nonce_1, VardiffConfig::default());
 
             if let Some(mut job) = distributor.create_job(&temp_channel, clean_jobs) {
                 job.channel_id = channel_id;
@@ -1588,7 +1599,7 @@ impl PoolServer {
     ) {
         // Get channel state (simplified - in production we'd store this)
         let nonce_1 = Channel::generate_nonce_1(channel_id, self.config.nonce_1_len);
-        let mut channel = Channel::new(nonce_1, VardiffConfig::default());
+        let mut channel = Channel::new_with_id(channel_id, nonce_1, VardiffConfig::default());
 
         // Reconstruct job state (simplified)
         {
@@ -1702,20 +1713,25 @@ use zcash_pool_server::channel::Channel;
 use zcash_pool_server::job::JobDistributor;
 use zcash_equihash_validator::VardiffConfig;
 use zcash_mining_protocol::messages::{NewEquihashJob, SubmitEquihashShare};
-use zcash_template_provider::template::BlockTemplate;
+use zcash_template_provider::types::{BlockTemplate, EquihashHeader, Hash256, TemplateTransaction};
 
 fn make_test_template() -> BlockTemplate {
     BlockTemplate {
+        template_id: 1,
         height: 1000,
-        prev_hash: [0xaa; 32],
-        merkle_root: [0xbb; 32],
-        block_commitments: [0xcc; 32],
-        time: 1700000000,
-        bits: 0x1d00ffff,
-        version: 5,
-        transactions: vec![],
-        coinbase_tx: vec![],
-        target: "00000000ffff0000000000000000000000000000000000000000000000000000".to_string(),
+        header: EquihashHeader {
+            version: 5,
+            prev_hash: Hash256([0xaa; 32]),
+            merkle_root: Hash256([0xbb; 32]),
+            hash_block_commitments: Hash256([0xcc; 32]),
+            time: 1700000000,
+            bits: 0x1d00ffff,
+            nonce: [0u8; 32],
+        },
+        target: Hash256([0x00; 32]),
+        transactions: Vec::<TemplateTransaction>::new(),
+        coinbase: vec![],
+        total_fees: 0,
     }
 }
 

@@ -648,7 +648,18 @@ pub fn decode_new_equihash_job(data: &[u8]) -> Result<NewEquihashJob> {
         return Err(ProtocolError::InvalidMessageType(frame.msg_type));
     }
 
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(ProtocolError::MessageTooShort {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+    if data.len() > total_len {
+        return Err(ProtocolError::EncodingError("trailing bytes in message".into()));
+    }
+
+    let payload = &data[MessageFrame::HEADER_SIZE..total_len];
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor.read_u32::<LittleEndian>().map_err(|e| {
@@ -755,7 +766,18 @@ pub fn decode_submit_share(data: &[u8]) -> Result<SubmitEquihashShare> {
         return Err(ProtocolError::InvalidMessageType(frame.msg_type));
     }
 
-    let payload = &data[MessageFrame::HEADER_SIZE..];
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(ProtocolError::MessageTooShort {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+    if data.len() > total_len {
+        return Err(ProtocolError::EncodingError("trailing bytes in message".into()));
+    }
+
+    let payload = &data[MessageFrame::HEADER_SIZE..total_len];
     let mut cursor = Cursor::new(payload);
 
     let channel_id = cursor.read_u32::<LittleEndian>().map_err(|e| {
@@ -1337,8 +1359,8 @@ impl Target {
         self.0
     }
 
-    /// Maximum target (difficulty 1)
-    pub fn max() -> Self {
+    /// Maximum target for Zcash mainnet (difficulty 1)
+    pub fn max_mainnet() -> Self {
         // Zcash's powLimit for mainnet
         // 0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
         let mut target = [0xff; 32];
@@ -1347,6 +1369,11 @@ impl Target {
         target[30] = 0x00;
         target[31] = 0x00;
         Self(target)
+    }
+
+    /// Maximum target from a little-endian 256-bit pow limit
+    pub fn max_from_le_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     /// Check if a hash meets this target (hash <= target)
@@ -1424,8 +1451,21 @@ pub fn compact_to_target(compact: u32) -> Target {
 /// Convert target to difficulty
 ///
 /// Difficulty = max_target / target
+pub fn target_to_difficulty_with_max(target: &Target, max: &Target) -> f64 {
+    let max_val = target_to_f64(max);
+    let target_val = target_to_f64(target);
+
+    if target_val == 0.0 {
+        return f64::INFINITY;
+    }
+
+    max_val / target_val
+}
+
+/// Convert target to difficulty using mainnet powLimit
 pub fn target_to_difficulty(target: &Target) -> f64 {
-    let max = Target::max();
+    target_to_difficulty_with_max(target, &Target::max_mainnet())
+}
 
     // Convert to f64 for division (approximate but sufficient for display)
     let max_val = target_to_f64(&max);
@@ -1441,16 +1481,20 @@ pub fn target_to_difficulty(target: &Target) -> f64 {
 /// Convert difficulty to target
 ///
 /// Target = max_target / difficulty
-pub fn difficulty_to_target(difficulty: f64) -> Target {
+pub fn difficulty_to_target_with_max(difficulty: f64, max: &Target) -> Target {
     if difficulty <= 0.0 {
-        return Target::max();
+        return *max;
     }
 
-    let max = Target::max();
-    let max_val = target_to_f64(&max);
+    let max_val = target_to_f64(max);
     let target_val = max_val / difficulty;
 
     f64_to_target(target_val)
+}
+
+/// Convert difficulty to target using mainnet powLimit
+pub fn difficulty_to_target(difficulty: f64) -> Target {
+    difficulty_to_target_with_max(difficulty, &Target::max_mainnet())
 }
 
 /// Convert target to approximate f64 (loses precision for very large values)

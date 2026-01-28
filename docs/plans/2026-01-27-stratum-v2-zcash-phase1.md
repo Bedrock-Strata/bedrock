@@ -98,7 +98,6 @@ Expected: Compilation errors for missing modules (expected at this stage)
 **Step 5: Commit**
 
 ```bash
-git init
 git add Cargo.toml crates/
 git commit -m "chore: initialize Rust workspace with template-provider crate"
 ```

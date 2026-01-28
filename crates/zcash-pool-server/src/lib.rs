@@ -11,6 +11,7 @@ pub mod channel;
 pub mod config;
 pub mod duplicate;
 pub mod error;
+pub mod fiber;
 pub mod job;
 pub mod payout;
 pub mod server;

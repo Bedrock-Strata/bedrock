@@ -2778,6 +2778,7 @@ dependencies = [
  "hex",
  "rustc-hash",
  "serde",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",

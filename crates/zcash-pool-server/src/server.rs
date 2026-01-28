@@ -211,6 +211,21 @@ impl PoolServer {
             }
         });
 
+        // Initialize and start fiber relay if enabled
+        if let Some(ref fiber) = self.fiber_relay {
+            if let Err(e) = fiber.init().await {
+                warn!("Failed to initialize fiber relay: {}. Continuing without relay.", e);
+            } else {
+                let fiber = Arc::clone(fiber);
+                tokio::spawn(async move {
+                    if let Err(e) = fiber.start().await {
+                        warn!("Fiber relay start error: {}", e);
+                    }
+                });
+                info!("Fiber relay started");
+            }
+        }
+
         // Spawn periodic stats logging
         let payout_tracker = Arc::clone(&self.payout_tracker);
         let sessions = Arc::clone(&self.sessions);

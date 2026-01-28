@@ -142,7 +142,7 @@ impl FiberRelay {
         full_header.push(0xfd);
         full_header.extend_from_slice(&(EQUIHASH_SOLUTION_SIZE as u16).to_le_bytes());
         // Add placeholder solution
-        full_header.extend(std::iter::repeat(0u8).take(EQUIHASH_SOLUTION_SIZE));
+        full_header.extend(std::iter::repeat_n(0u8, EQUIHASH_SOLUTION_SIZE));
 
         let header_hash = self.compute_header_hash(&full_header);
 

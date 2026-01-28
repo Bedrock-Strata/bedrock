@@ -98,7 +98,7 @@ impl TokenManager {
                 .values()
                 .filter(|t| t.client_id == client_id && !t.is_expired())
                 .count();
-            if client_token_count >= self.config.max_tokens_per_client as usize {
+            if client_token_count >= self.config.max_tokens_per_client {
                 return Err(JdServerError::Protocol(format!(
                     "Max tokens per client exceeded ({})",
                     self.config.max_tokens_per_client

@@ -14,17 +14,18 @@
 
 use crate::channel::Channel;
 use crate::config::PoolConfig;
-use crate::fiber::FiberRelay;
 use crate::duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 use crate::error::{PoolError, Result};
+use crate::fiber::FiberRelay;
 use crate::job::JobDistributor;
 use crate::payout::{MinerId, PayoutTracker};
+use crate::security::{ConnectionTracker, SequenceCheckResult, SequenceValidator, TimingJitter};
 use crate::session::{ServerMessage, Session, SessionMessage, Transport};
 use crate::share::ShareProcessor;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::{mpsc, RwLock};
@@ -73,6 +74,14 @@ pub struct PoolServer {
     metrics: Arc<PoolMetrics>,
     /// Fiber relay for compact block propagation (optional)
     fiber_relay: Option<Arc<FiberRelay>>,
+    /// Sequence validator for replay protection
+    sequence_validator: Arc<SequenceValidator>,
+    /// Connection tracker for attack detection
+    connection_tracker: Arc<ConnectionTracker>,
+    /// Timing jitter for response timing attack mitigation
+    timing_jitter: Arc<TimingJitter>,
+    /// Track connection start times (channel_id -> (Instant, SocketAddr))
+    connection_times: Arc<RwLock<HashMap<u32, (Instant, SocketAddr)>>>,
 }
 
 impl PoolServer {
@@ -153,8 +162,37 @@ impl PoolServer {
             };
             Some(Arc::new(NoiseResponder::new(keypair)))
         } else {
+            // Warn about insecure plain mode if configured
+            if config.warn_plain_mode {
+                warn!("⚠️  SECURITY WARNING: Noise encryption is DISABLED");
+                warn!("    Plain mode is vulnerable to StraTap, BiteCoin, and ISP Log attacks");
+                warn!("    Enable noise_enabled=true for production deployments");
+            }
             None
         };
+
+        // Create security components
+        let sequence_validator = Arc::new(SequenceValidator::new(
+            config.sequence_max_gap,
+            128, // Window size for tracking seen sequences
+        ));
+
+        let connection_tracker = Arc::new(ConnectionTracker::new(
+            Duration::from_secs(config.short_lived_threshold_secs),
+            Duration::from_secs(300), // 5 minute tracking window
+            config.max_short_lived_per_window,
+        ));
+
+        let timing_jitter = Arc::new(TimingJitter::new(
+            Duration::from_millis(config.timing_jitter_min_ms),
+            Duration::from_millis(config.timing_jitter_max_ms),
+        ));
+
+        info!("Security features: sequence_validation={}, connection_tracking={}, timing_jitter={}",
+            config.sequence_validation_enabled,
+            config.connection_tracking_enabled,
+            config.timing_jitter_enabled
+        );
 
         Ok(Self {
             config,
@@ -173,6 +211,10 @@ impl PoolServer {
             noise_responder,
             metrics,
             fiber_relay,
+            sequence_validator,
+            connection_tracker,
+            timing_jitter,
+            connection_times: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -267,6 +309,13 @@ impl PoolServer {
                             // Track connection in metrics
                             self.metrics.record_connection();
 
+                            // Check if this address is flagged as suspicious
+                            if self.config.connection_tracking_enabled
+                                && self.connection_tracker.is_flagged(&addr)
+                            {
+                                warn!("Connection from flagged address {}, allowing but monitoring", addr);
+                            }
+
                             // Handle Noise handshake if enabled
                             if self.config.noise_enabled {
                                 if let Some(ref responder) = self.noise_responder {
@@ -274,7 +323,7 @@ impl PoolServer {
                                     match responder.accept(stream).await {
                                         Ok(noise_stream) => {
                                             info!("Noise handshake successful for {}", addr);
-                                            if let Err(e) = self.handle_new_connection(Transport::Noise(noise_stream)).await {
+                                            if let Err(e) = self.handle_new_connection(Transport::Noise(noise_stream), addr).await {
                                                 self.metrics.record_disconnection();
                                                 error!("Error handling new Noise connection: {}", e);
                                             }
@@ -282,19 +331,28 @@ impl PoolServer {
                                         Err(e) => {
                                             self.metrics.record_noise_handshake_failed();
                                             self.metrics.record_disconnection();
+                                            self.metrics.record_decryption_failure();
                                             warn!("Noise handshake failed for {}: {}", addr, e);
+
+                                            // Track handshake failure as decryption error
+                                            if self.config.connection_tracking_enabled {
+                                                let connected_at = self.connection_tracker.on_connect(addr);
+                                                if self.connection_tracker.on_disconnect(addr, connected_at, true) {
+                                                    self.metrics.inc_flagged_addresses();
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
                                     warn!("Noise enabled but no responder available; falling back to plaintext");
-                                    if let Err(e) = self.handle_new_connection(Transport::Plain(stream)).await {
+                                    if let Err(e) = self.handle_new_connection(Transport::Plain(stream), addr).await {
                                         self.metrics.record_disconnection();
                                         error!("Error handling new connection: {}", e);
                                     }
                                 }
                             } else {
                                 // No Noise - handle connection directly
-                                if let Err(e) = self.handle_new_connection(Transport::Plain(stream)).await {
+                                if let Err(e) = self.handle_new_connection(Transport::Plain(stream), addr).await {
                                     self.metrics.record_disconnection();
                                     error!("Error handling new connection: {}", e);
                                 }
@@ -405,7 +463,15 @@ impl PoolServer {
     async fn handle_new_connection(
         &self,
         transport: Transport,
+        addr: SocketAddr,
     ) -> Result<()> {
+        // Track connection start time
+        let connected_at = if self.config.connection_tracking_enabled {
+            self.connection_tracker.on_connect(addr)
+        } else {
+            Instant::now()
+        };
+
         // Generate unique nonce_1 for this channel
         let channel_id = Channel::next_id();
         let nonce_1 = match Channel::generate_nonce_1(channel_id, self.config.nonce_1_len) {
@@ -465,6 +531,12 @@ impl PoolServer {
             server_to_session_rx,
         );
 
+        // Store connection time for tracking
+        {
+            let mut conn_times = self.connection_times.write().await;
+            conn_times.insert(channel_id, (connected_at, addr));
+        }
+
         // Send initial job if available
         let initial_job = {
             let distributor = self.job_distributor.read().await;
@@ -492,10 +564,26 @@ impl PoolServer {
         let sessions = Arc::clone(&self.sessions);
         let channels = Arc::clone(&self.channels);
         let metrics = Arc::clone(&self.metrics);
+        let connection_tracker = Arc::clone(&self.connection_tracker);
+        let sequence_validator = Arc::clone(&self.sequence_validator);
+        let connection_times = Arc::clone(&self.connection_times);
+        let connection_tracking_enabled = self.config.connection_tracking_enabled;
+        let short_lived_threshold = Duration::from_secs(self.config.short_lived_threshold_secs);
+
         tokio::spawn(async move {
-            if let Err(e) = session.run().await {
-                debug!("Session {} ended: {}", channel_id, e);
-            }
+            let decryption_error = match session.run().await {
+                Ok(()) => false,
+                Err(e) => {
+                    debug!("Session {} ended: {}", channel_id, e);
+                    // Check if this looks like a decryption error
+                    e.to_string().contains("decrypt")
+                        || e.to_string().contains("InvalidData")
+                }
+            };
+
+            // Get connection time info before cleanup
+            let conn_info = connection_times.write().await.remove(&channel_id);
+
             // Clean up session and channel atomically on exit
             // Note: We take both locks before modifying either to prevent race conditions
             // where share validation could access a channel that's partially cleaned up
@@ -505,6 +593,28 @@ impl PoolServer {
                 sessions_guard.remove(&channel_id);
                 channels_guard.remove(&channel_id);
             }
+
+            // Track connection duration and detect attack patterns
+            if let Some((connected_at, addr)) = conn_info {
+                let duration = connected_at.elapsed();
+                metrics.observe_connection_duration(duration.as_secs_f64());
+
+                // Check for short-lived connection
+                if duration < short_lived_threshold {
+                    metrics.record_short_lived_connection();
+                }
+
+                // Track disconnection for attack pattern detection
+                if connection_tracking_enabled {
+                    if connection_tracker.on_disconnect(addr, connected_at, decryption_error) {
+                        metrics.inc_flagged_addresses();
+                    }
+                }
+
+                // Clean up sequence validator state
+                sequence_validator.remove_channel(channel_id);
+            }
+
             metrics.record_disconnection();
         });
 
@@ -627,6 +737,50 @@ impl PoolServer {
         share: zcash_mining_protocol::messages::SubmitEquihashShare,
         response_tx: tokio::sync::oneshot::Sender<zcash_mining_protocol::messages::ShareResult>,
     ) -> Result<()> {
+        // Validate sequence number for replay protection
+        if self.config.sequence_validation_enabled {
+            let seq_result = self.sequence_validator.validate(channel_id, share.sequence_number);
+            match seq_result {
+                SequenceCheckResult::Valid => {}
+                SequenceCheckResult::ValidOutOfOrder => {
+                    self.metrics.record_sequence_anomaly();
+                    debug!(
+                        "Out-of-order sequence {} for channel {}",
+                        share.sequence_number, channel_id
+                    );
+                }
+                SequenceCheckResult::Replay => {
+                    self.metrics.record_replay_attempt();
+                    warn!(
+                        "Replay detected: channel {} seq {} - rejecting share",
+                        channel_id, share.sequence_number
+                    );
+                    return response_tx
+                        .send(ShareResult::Rejected(
+                            zcash_mining_protocol::messages::RejectReason::Duplicate,
+                        ))
+                        .map_err(|_| PoolError::ChannelSend)
+                        .map(|_| ());
+                }
+                SequenceCheckResult::GapTooLarge => {
+                    self.metrics.record_sequence_anomaly();
+                    warn!(
+                        "Large sequence gap: channel {} seq {} - potential attack",
+                        channel_id, share.sequence_number
+                    );
+                    // Allow but log - could be network reordering
+                }
+                SequenceCheckResult::StaleSequence => {
+                    self.metrics.record_sequence_anomaly();
+                    debug!(
+                        "Stale sequence {} for channel {}",
+                        share.sequence_number, channel_id
+                    );
+                    // Allow but log
+                }
+            }
+        }
+
         // Check rate limit BEFORE any expensive validation
         {
             let mut channels = self.channels.write().await;
@@ -775,6 +929,11 @@ impl PoolServer {
                     .send(ServerMessage::SetTarget { target })
                     .await;
             }
+        }
+
+        // Apply timing jitter before response (mitigates timing attacks)
+        if self.config.timing_jitter_enabled {
+            self.timing_jitter.apply().await;
         }
 
         // Send response back to session

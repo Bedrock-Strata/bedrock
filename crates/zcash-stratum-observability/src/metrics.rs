@@ -61,6 +61,20 @@ pub struct PoolMetrics {
     pub noise_handshakes_total: IntCounter,
     /// Total failed Noise handshakes
     pub noise_handshakes_failed: IntCounter,
+
+    // Security metrics (attack detection and monitoring)
+    /// Total decryption failures (potential EROSION attack indicator)
+    pub decryption_failures: IntCounter,
+    /// Total replay attempts detected
+    pub replay_attempts: IntCounter,
+    /// Total sequence anomalies detected
+    pub sequence_anomalies: IntCounter,
+    /// Currently flagged suspicious addresses
+    pub flagged_addresses: IntGauge,
+    /// Total short-lived connections (potential attack indicator)
+    pub short_lived_connections: IntCounter,
+    /// Histogram of connection durations in seconds
+    pub connection_duration: Histogram,
 }
 
 impl PoolMetrics {
@@ -183,6 +197,62 @@ impl PoolMetrics {
         )
         .expect("metric can be created");
 
+        // Security metrics
+        let decryption_failures = IntCounter::with_opts(
+            Opts::new(
+                "pool_decryption_failures_total",
+                "Total decryption failures (potential EROSION attack indicator)",
+            )
+            .namespace("zcash_stratum"),
+        )
+        .expect("metric can be created");
+
+        let replay_attempts = IntCounter::with_opts(
+            Opts::new(
+                "pool_replay_attempts_total",
+                "Total replay attempts detected",
+            )
+            .namespace("zcash_stratum"),
+        )
+        .expect("metric can be created");
+
+        let sequence_anomalies = IntCounter::with_opts(
+            Opts::new(
+                "pool_sequence_anomalies_total",
+                "Total sequence anomalies detected",
+            )
+            .namespace("zcash_stratum"),
+        )
+        .expect("metric can be created");
+
+        let flagged_addresses = IntGauge::with_opts(
+            Opts::new(
+                "pool_flagged_addresses",
+                "Currently flagged suspicious addresses",
+            )
+            .namespace("zcash_stratum"),
+        )
+        .expect("metric can be created");
+
+        let short_lived_connections = IntCounter::with_opts(
+            Opts::new(
+                "pool_short_lived_connections_total",
+                "Total short-lived connections (potential attack indicator)",
+            )
+            .namespace("zcash_stratum"),
+        )
+        .expect("metric can be created");
+
+        let connection_duration = Histogram::with_opts(
+            HistogramOpts::new(
+                "pool_connection_duration_seconds",
+                "Connection duration in seconds",
+            )
+            .namespace("zcash_stratum")
+            .buckets(vec![0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0]),
+        )
+        .expect("metric can be created");
+
         // Register all metrics
         registry
             .register(Box::new(connections_total.clone()))
@@ -226,6 +296,24 @@ impl PoolMetrics {
         registry
             .register(Box::new(noise_handshakes_failed.clone()))
             .expect("metric can be registered");
+        registry
+            .register(Box::new(decryption_failures.clone()))
+            .expect("metric can be registered");
+        registry
+            .register(Box::new(replay_attempts.clone()))
+            .expect("metric can be registered");
+        registry
+            .register(Box::new(sequence_anomalies.clone()))
+            .expect("metric can be registered");
+        registry
+            .register(Box::new(flagged_addresses.clone()))
+            .expect("metric can be registered");
+        registry
+            .register(Box::new(short_lived_connections.clone()))
+            .expect("metric can be registered");
+        registry
+            .register(Box::new(connection_duration.clone()))
+            .expect("metric can be registered");
 
         Self {
             registry,
@@ -243,6 +331,12 @@ impl PoolMetrics {
             template_fetch_duration,
             noise_handshakes_total,
             noise_handshakes_failed,
+            decryption_failures,
+            replay_attempts,
+            sequence_anomalies,
+            flagged_addresses,
+            short_lived_connections,
+            connection_duration,
         }
     }
 
@@ -329,6 +423,48 @@ impl PoolMetrics {
     /// Record a failed Noise handshake
     pub fn record_noise_handshake_failed(&self) {
         self.noise_handshakes_failed.inc();
+    }
+
+    // ========== Security Metrics ==========
+
+    /// Record a decryption failure (potential EROSION attack indicator)
+    pub fn record_decryption_failure(&self) {
+        self.decryption_failures.inc();
+    }
+
+    /// Record a replay attempt detected
+    pub fn record_replay_attempt(&self) {
+        self.replay_attempts.inc();
+    }
+
+    /// Record a sequence anomaly
+    pub fn record_sequence_anomaly(&self) {
+        self.sequence_anomalies.inc();
+    }
+
+    /// Update the count of flagged suspicious addresses
+    pub fn set_flagged_addresses(&self, count: i64) {
+        self.flagged_addresses.set(count);
+    }
+
+    /// Increment flagged addresses count
+    pub fn inc_flagged_addresses(&self) {
+        self.flagged_addresses.inc();
+    }
+
+    /// Decrement flagged addresses count
+    pub fn dec_flagged_addresses(&self) {
+        self.flagged_addresses.dec();
+    }
+
+    /// Record a short-lived connection (potential attack indicator)
+    pub fn record_short_lived_connection(&self) {
+        self.short_lived_connections.inc();
+    }
+
+    /// Record connection duration when a connection ends
+    pub fn observe_connection_duration(&self, duration_secs: f64) {
+        self.connection_duration.observe(duration_secs);
     }
 }
 
@@ -501,5 +637,47 @@ mod tests {
         let metrics = PoolMetrics::default();
         let encoded = metrics.encode();
         assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn test_security_metrics() {
+        let metrics = PoolMetrics::new();
+
+        metrics.record_decryption_failure();
+        metrics.record_decryption_failure();
+        metrics.record_replay_attempt();
+        metrics.record_sequence_anomaly();
+        metrics.record_short_lived_connection();
+        metrics.inc_flagged_addresses();
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("zcash_stratum_pool_decryption_failures_total 2"));
+        assert!(encoded.contains("zcash_stratum_pool_replay_attempts_total 1"));
+        assert!(encoded.contains("zcash_stratum_pool_sequence_anomalies_total 1"));
+        assert!(encoded.contains("zcash_stratum_pool_short_lived_connections_total 1"));
+        assert!(encoded.contains("zcash_stratum_pool_flagged_addresses 1"));
+    }
+
+    #[test]
+    fn test_connection_duration_metric() {
+        let metrics = PoolMetrics::new();
+
+        metrics.observe_connection_duration(30.5);
+        metrics.observe_connection_duration(120.0);
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("zcash_stratum_pool_connection_duration_seconds"));
+    }
+
+    #[test]
+    fn test_flagged_addresses_gauge() {
+        let metrics = PoolMetrics::new();
+
+        metrics.inc_flagged_addresses();
+        metrics.inc_flagged_addresses();
+        metrics.dec_flagged_addresses();
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("zcash_stratum_pool_flagged_addresses 1"));
     }
 }

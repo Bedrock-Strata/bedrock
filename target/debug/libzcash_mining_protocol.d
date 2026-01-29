@@ -1,1 +1,0 @@
-/Users/zakimanian/stratum-zcash/target/debug/libzcash_mining_protocol.rlib: /Users/zakimanian/stratum-zcash/crates/zcash-mining-protocol/src/codec.rs /Users/zakimanian/stratum-zcash/crates/zcash-mining-protocol/src/error.rs /Users/zakimanian/stratum-zcash/crates/zcash-mining-protocol/src/lib.rs /Users/zakimanian/stratum-zcash/crates/zcash-mining-protocol/src/messages.rs

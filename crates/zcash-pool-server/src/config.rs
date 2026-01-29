@@ -76,6 +76,26 @@ pub struct PoolConfig {
     pub fiber_data_shards: usize,
     /// FEC parity shards (default: 3)
     pub fiber_parity_shards: usize,
+
+    // Security settings (attack mitigation)
+    /// Enable sequence validation for replay attack protection
+    pub sequence_validation_enabled: bool,
+    /// Maximum allowed gap in sequence numbers (for out-of-order handling)
+    pub sequence_max_gap: u32,
+    /// Enable connection pattern tracking (EROSION attack detection)
+    pub connection_tracking_enabled: bool,
+    /// Threshold for "short-lived" connections in seconds
+    pub short_lived_threshold_secs: u64,
+    /// Maximum short-lived connections before flagging an address
+    pub max_short_lived_per_window: usize,
+    /// Enable timing jitter for share responses (timing attack mitigation)
+    pub timing_jitter_enabled: bool,
+    /// Minimum timing jitter in milliseconds
+    pub timing_jitter_min_ms: u64,
+    /// Maximum timing jitter in milliseconds
+    pub timing_jitter_max_ms: u64,
+    /// Warn if Noise is disabled (plain mode is insecure)
+    pub warn_plain_mode: bool,
 }
 
 /// Configuration validation errors
@@ -220,6 +240,16 @@ impl Default for PoolConfig {
             fiber_auth_key: None,
             fiber_data_shards: 10,
             fiber_parity_shards: 3,
+            // Security defaults - enable protections by default
+            sequence_validation_enabled: true,
+            sequence_max_gap: 1000,
+            connection_tracking_enabled: true,
+            short_lived_threshold_secs: 5,
+            max_short_lived_per_window: 10,
+            timing_jitter_enabled: false, // Disabled by default for performance
+            timing_jitter_min_ms: 0,
+            timing_jitter_max_ms: 50,
+            warn_plain_mode: true,
         }
     }
 }

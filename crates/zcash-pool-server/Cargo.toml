@@ -20,8 +20,7 @@ zcash-pool-common = { path = "../zcash-pool-common" }
 zcash-jd-server = { path = "../zcash-jd-server" }
 zcash-stratum-noise = { path = "../zcash-stratum-noise" }
 zcash-stratum-observability = { path = "../zcash-stratum-observability" }
-# fiber-zcash: uncomment below and enable "fiber" feature when fiber-zcash crate is available
-# fiber-zcash = { path = "../../../fiber-zcash", optional = true }
+fiber-zcash = { path = "../fiber-zcash", optional = true }
 blake2b_simd.workspace = true
 byteorder.workspace = true
 hex.workspace = true
@@ -29,11 +28,8 @@ rand = "0.8"
 sha2.workspace = true
 
 [features]
-default = []
-# Enable fiber relay support (requires fiber-zcash crate to be available)
-# To enable: uncomment the fiber-zcash dependency above and change this to:
-#   fiber = ["dep:fiber-zcash"]
-fiber = []
+default = ["fiber"]
+fiber = ["dep:fiber-zcash"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

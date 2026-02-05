@@ -1,0 +1,28 @@
+[package]
+name = "fiber-sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fiber relay sidecar for Stratum V1 mining pools"
+
+[[bin]]
+name = "fiber-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+fiber-zcash = { path = "../fiber-zcash" }
+tokio = { workspace = true, features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+toml = "0.8"
+
+# Zebra RPC client
+jsonrpsee = { version = "0.24", features = ["http-client"] }
+
+[dev-dependencies]
+tempfile = "3"

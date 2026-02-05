@@ -44,7 +44,8 @@ zcash-pool-server (main orchestrator)
 ├── zcash-jd-server             # Job Declaration Server (miner-controlled templates)
 ├── zcash-stratum-noise         # Noise_NK encryption
 ├── zcash-stratum-observability # Prometheus metrics, tracing
-└── fiber-zcash (external)      # Compact block relay
+├── fiber-zcash                  # Compact block relay
+└── fiber-sidecar                # Fiber relay sidecar binary
 
 zcash-jd-client (standalone binary)
 ├── zcash-template-provider
@@ -102,7 +103,6 @@ Pool server config fields:
 ## External Dependencies
 
 - **Zebra node**: Required for `getblocktemplate` RPC (port 8232 mainnet)
-- **fiber-zcash**: Local path dependency at `../fiber-zcash`
 - **equihash** crate: Core Equihash algorithm implementation
 
 ## Documentation

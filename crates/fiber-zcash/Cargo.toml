@@ -1,26 +1,23 @@
-[workspace]
-members = [".", "fiber-sidecar"]
-
 [package]
 name = "fiber-zcash"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Low-latency block relay network for Zcash"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/zmanian/fiber-zcash"
+repository = "https://github.com/iqlusioninc/stratum-zcash"
 
 [dependencies]
-thiserror = "1.0"
-hex = "0.4"
+thiserror = { workspace = true }
+hex = { workspace = true }
 siphasher = "1.0"
 reed-solomon-erasure = "6.0"
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros", "time", "sync"] }
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = { workspace = true }
 bytes = "1.5"
 subtle = "2.5"
-tracing = "0.1"
-equihash = "0.2"
+tracing = { workspace = true }
+equihash = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.4"

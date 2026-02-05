@@ -16,6 +16,7 @@ use crate::channel::Channel;
 use crate::config::PoolConfig;
 use crate::duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 use crate::error::{PoolError, Result};
+#[cfg(feature = "fiber")]
 use crate::fiber::FiberRelay;
 use crate::job::JobDistributor;
 use crate::payout::{MinerId, PayoutTracker};
@@ -72,7 +73,8 @@ pub struct PoolServer {
     noise_responder: Option<Arc<NoiseResponder>>,
     /// Pool metrics
     metrics: Arc<PoolMetrics>,
-    /// Fiber relay for compact block propagation (optional)
+    /// Fiber relay for compact block propagation (optional, requires "fiber" feature)
+    #[cfg(feature = "fiber")]
     fiber_relay: Option<Arc<FiberRelay>>,
     /// Sequence validator for replay protection
     sequence_validator: Arc<SequenceValidator>,
@@ -87,6 +89,11 @@ pub struct PoolServer {
 impl PoolServer {
     /// Create a new pool server
     pub fn new(config: PoolConfig) -> Result<Self> {
+        // Validate configuration before proceeding
+        config
+            .validate()
+            .map_err(|e| PoolError::Config(e.to_string()))?;
+
         // Initialize logging based on config
         let log_format = if config.json_logging {
             LogFormat::Json
@@ -98,7 +105,8 @@ impl PoolServer {
         // Create metrics
         let metrics = Arc::new(PoolMetrics::new());
 
-        // Create fiber relay if enabled
+        // Create fiber relay if enabled (requires "fiber" feature)
+        #[cfg(feature = "fiber")]
         let fiber_relay = if config.fiber_relay_enabled {
             match FiberRelay::new(&config) {
                 Ok(relay) => {
@@ -114,6 +122,10 @@ impl PoolServer {
             info!("Fiber relay disabled");
             None
         };
+        #[cfg(not(feature = "fiber"))]
+        if config.fiber_relay_enabled {
+            warn!("Fiber relay requested but 'fiber' feature is not enabled. Ignoring.");
+        }
 
         // Create template provider
         let tp_config = TemplateProviderConfig {
@@ -210,6 +222,7 @@ impl PoolServer {
             jd_listen_addr,
             noise_responder,
             metrics,
+            #[cfg(feature = "fiber")]
             fiber_relay,
             sequence_validator,
             connection_tracker,
@@ -254,6 +267,7 @@ impl PoolServer {
         });
 
         // Initialize and start fiber relay if enabled
+        #[cfg(feature = "fiber")]
         if let Some(ref fiber) = self.fiber_relay {
             if let Err(e) = fiber.init().await {
                 warn!("Failed to initialize fiber relay: {}. Continuing without relay.", e);
@@ -287,6 +301,21 @@ impl PoolServer {
                     "Pool stats: {} connections, {} active miners, {:.2} H/s",
                     session_count, active_miners, hashrate
                 );
+            }
+        });
+
+        // Spawn periodic cleanup for connection tracker and sequence validator
+        let cleanup_connection_tracker = Arc::clone(&self.connection_tracker);
+        let cleanup_sequence_validator = Arc::clone(&self.sequence_validator);
+        tokio::spawn(async move {
+            // Run cleanup every 5 minutes
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            let max_age = Duration::from_secs(3600); // 1 hour
+            loop {
+                interval.tick().await;
+                cleanup_connection_tracker.cleanup(max_age);
+                cleanup_sequence_validator.cleanup_stale(max_age);
+                debug!("Periodic cleanup completed for connection tracker and sequence validator");
             }
         });
 
@@ -491,6 +520,7 @@ impl PoolServer {
         // Create vardiff config
         let vardiff_config = VardiffConfig {
             target_shares_per_minute: self.config.target_shares_per_minute,
+            initial_difficulty: self.config.initial_difficulty,
             min_difficulty: self.config.initial_difficulty,
             max_difficulty: 1e12,
             retarget_interval: Duration::from_secs(90),
@@ -640,6 +670,7 @@ impl PoolServer {
             .await;
 
         // Announce to fiber relay network (non-blocking)
+        #[cfg(feature = "fiber")]
         if let Some(ref fiber) = self.fiber_relay {
             let fiber = Arc::clone(fiber);
             let template_clone = template.clone();
@@ -866,6 +897,7 @@ impl PoolServer {
 
                         // Announce to fiber relay BEFORE submitting to Zebra
                         // This gives the relay network a head start
+                        #[cfg(feature = "fiber")]
                         if let Some(ref fiber) = self.fiber_relay {
                             let header = job.build_header(&job.build_nonce(&share.nonce_2).unwrap_or_default());
 
@@ -1039,6 +1071,18 @@ fn build_block_bytes(
         ));
     }
 
+    // Validate share timestamp: must be within ±2 hours of the job time
+    // to match Zcash's MAX_FUTURE_BLOCK_TIME consensus rule
+    const MAX_TIME_OFFSET: u32 = 7200; // 2 hours in seconds
+    if share.time > job.time.saturating_add(MAX_TIME_OFFSET)
+        || share.time < job.time.saturating_sub(MAX_TIME_OFFSET)
+    {
+        return Err(PoolError::InvalidMessage(format!(
+            "share time {} is too far from job time {} (max offset: {}s)",
+            share.time, job.time, MAX_TIME_OFFSET
+        )));
+    }
+
     let full_nonce = job
         .build_nonce(&share.nonce_2)
         .ok_or_else(|| PoolError::InvalidMessage("Invalid nonce_2 length".to_string()))?;
@@ -1052,6 +1096,8 @@ fn build_block_bytes(
             + template.transactions.len() * 100,
     );
     block.extend_from_slice(&header);
+    // CompactSize encoding for solution length (1344 bytes)
+    write_varint(1344, &mut block);
     block.extend_from_slice(&share.solution);
 
     let tx_count = 1 + template.transactions.len() as u64;

@@ -18,6 +18,7 @@ pub mod channel;
 pub mod config;
 pub mod duplicate;
 pub mod error;
+#[cfg(feature = "fiber")]
 pub mod fiber;
 pub mod job;
 pub mod payout;
@@ -32,6 +33,7 @@ pub use channel::{Channel, ChannelJob};
 pub use config::PoolConfig;
 pub use duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 pub use error::PoolError;
+#[cfg(feature = "fiber")]
 pub use fiber::FiberRelay;
 pub use job::JobDistributor;
 pub use payout::{MinerId, MinerStats, PayoutTracker};

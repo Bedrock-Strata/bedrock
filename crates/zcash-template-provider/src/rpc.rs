@@ -12,19 +12,27 @@ pub struct ZebraRpc {
     client: Client,
     url: String,
     request_id: AtomicU64,
+    /// Optional HTTP basic auth credentials
+    auth: Option<(String, String)>,
 }
 
 impl ZebraRpc {
     /// Create a new RPC client
-    pub fn new(url: &str, _user: Option<&str>, _pass: Option<&str>) -> Result<Self> {
+    pub fn new(url: &str, user: Option<&str>, pass: Option<&str>) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
+
+        let auth = match (user, pass) {
+            (Some(u), Some(p)) => Some((u.to_string(), p.to_string())),
+            _ => None,
+        };
 
         Ok(Self {
             client,
             url: url.to_string(),
             request_id: AtomicU64::new(1),
+            auth,
         })
     }
 
@@ -37,18 +45,17 @@ impl ZebraRpc {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
 
         let request = serde_json::json!({
-            "jsonrpc": "1.0",
+            "jsonrpc": "2.0",
             "id": id.to_string(),
             "method": method,
             "params": params,
         });
 
-        let response = self
-            .client
-            .post(&self.url)
-            .json(&request)
-            .send()
-            .await?;
+        let mut req_builder = self.client.post(&self.url).json(&request);
+        if let Some((ref user, ref pass)) = self.auth {
+            req_builder = req_builder.basic_auth(user, Some(pass));
+        }
+        let response = req_builder.send().await?;
 
         let body: Value = response.json().await?;
 

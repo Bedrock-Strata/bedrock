@@ -111,7 +111,10 @@ impl SequenceValidator {
     ///
     /// Returns whether the sequence is valid and should be processed.
     pub fn validate(&self, channel_id: u32, sequence: u32) -> SequenceCheckResult {
-        let mut channels = self.channels.write().unwrap();
+        let mut channels = self.channels.write().unwrap_or_else(|e| {
+            warn!("Sequence validator lock was poisoned in validate, recovering");
+            e.into_inner()
+        });
         let state = channels
             .entry(channel_id)
             .or_insert_with(SequenceState::new);
@@ -181,7 +184,10 @@ impl SequenceValidator {
     pub fn anomaly_count(&self, channel_id: u32) -> u32 {
         self.channels
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| {
+                warn!("Sequence validator lock was poisoned in anomaly_count, recovering");
+                e.into_inner()
+            })
             .get(&channel_id)
             .map(|s| s.anomaly_count)
             .unwrap_or(0)
@@ -189,12 +195,21 @@ impl SequenceValidator {
 
     /// Remove channel state (on disconnect)
     pub fn remove_channel(&self, channel_id: u32) {
-        self.channels.write().unwrap().remove(&channel_id);
+        self.channels
+            .write()
+            .unwrap_or_else(|e| {
+                warn!("Sequence validator lock was poisoned in remove_channel, recovering");
+                e.into_inner()
+            })
+            .remove(&channel_id);
     }
 
     /// Clean up stale channel entries
     pub fn cleanup_stale(&self, max_age: Duration) {
-        let mut channels = self.channels.write().unwrap();
+        let mut channels = self.channels.write().unwrap_or_else(|e| {
+            warn!("Sequence validator lock was poisoned in cleanup_stale, recovering");
+            e.into_inner()
+        });
         let now = Instant::now();
         channels.retain(|_, state| now.duration_since(state.last_update) < max_age);
     }
@@ -458,8 +473,6 @@ pub struct TimingJitter {
     min_delay: Duration,
     /// Maximum delay to add
     max_delay: Duration,
-    /// Counter for pseudo-random generation
-    counter: AtomicU64,
 }
 
 impl Default for TimingJitter {
@@ -474,24 +487,19 @@ impl TimingJitter {
         Self {
             min_delay,
             max_delay,
-            counter: AtomicU64::new(0),
         }
     }
 
     /// Get a jittered delay
     ///
-    /// Uses a simple PRNG based on a counter for deterministic but
-    /// unpredictable-to-external-observers delays.
+    /// Uses cryptographically random values so that an observer cannot
+    /// predict future jitter from past observations.
     pub fn get_delay(&self) -> Duration {
         if self.max_delay <= self.min_delay {
             return self.min_delay;
         }
 
-        let count = self.counter.fetch_add(1, Ordering::Relaxed);
-
-        // Simple linear congruential generator
-        let rand = (count.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) as f64
-            / u64::MAX as f64;
+        let rand: f64 = rand::random();
 
         let range = self.max_delay - self.min_delay;
         self.min_delay + range.mul_f64(rand)

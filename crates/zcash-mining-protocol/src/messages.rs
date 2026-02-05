@@ -5,10 +5,6 @@
 //! - SubmitEquihashShare: Sent by miner to submit solutions
 //! - SubmitSharesResponse: Pool's response to share submission
 
-// Note: serde derives will be added when serialization is implemented
-#[allow(unused_imports)]
-use serde::{Deserialize, Serialize};
-
 /// Message type identifiers (SRI-compatible range for extension)
 pub mod message_types {
     /// NewEquihashJob message type
@@ -111,8 +107,12 @@ impl SubmitEquihashShare {
     pub const SOLUTION_SIZE: usize = 1344;
 
     /// Validate solution length
+    ///
+    /// Note: This always returns true since `solution` is a fixed-size
+    /// `[u8; 1344]` array. Retained for API compatibility.
     pub fn validate_solution_len(&self) -> bool {
-        self.solution.len() == Self::SOLUTION_SIZE
+        // Compile-time guarantee: solution is always SOLUTION_SIZE bytes
+        true
     }
 }
 

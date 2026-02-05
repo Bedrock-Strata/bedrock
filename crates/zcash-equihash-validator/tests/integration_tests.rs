@@ -54,6 +54,7 @@ fn test_full_share_validation_flow() {
 fn test_vardiff_integration_with_protocol() {
     let config = VardiffConfig {
         target_shares_per_minute: 5.0,
+        initial_difficulty: 1.0,
         min_difficulty: 1.0,
         max_difficulty: 1_000_000.0,
         retarget_interval: std::time::Duration::from_secs(60),

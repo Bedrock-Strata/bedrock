@@ -1,0 +1,74 @@
+//! Fiber relay client wrapper for sidecar
+
+use fiber_zcash::{BlockSender, ClientConfig, CompactBlock, RelayClient};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
+
+/// Fiber relay wrapper
+pub struct FiberRelay {
+    client: Arc<RwLock<RelayClient>>,
+    sender: BlockSender,
+}
+
+impl FiberRelay {
+    /// Create a new fiber relay
+    pub fn new(
+        relay_peers: Vec<SocketAddr>,
+        auth_key: [u8; 32],
+        bind_addr: SocketAddr,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let config = ClientConfig::new(relay_peers, auth_key).with_bind_addr(bind_addr);
+
+        let client = RelayClient::new(config)?;
+        let sender = client.sender();
+
+        Ok(Self {
+            client: Arc::new(RwLock::new(client)),
+            sender,
+        })
+    }
+
+    /// Initialize the relay (bind socket)
+    pub async fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut client = self.client.write().await;
+        client.bind().await?;
+        info!(addr = ?client.local_addr(), "Fiber relay bound");
+        Ok(())
+    }
+
+    /// Start the relay run loop
+    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut client = self.client.write().await;
+        if client.take_receiver().is_none() {
+            warn!("Fiber relay receiver already taken");
+        }
+        Ok(())
+    }
+
+    /// Announce a compact block to the relay network
+    pub async fn announce(
+        &self,
+        compact: CompactBlock,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.sender.send(compact).await?;
+        debug!("Announced compact block to fiber relay");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_creation() {
+        let peers = vec!["127.0.0.1:8333".parse().unwrap()];
+        let auth_key = [0u8; 32];
+        let bind_addr = "0.0.0.0:0".parse().unwrap();
+
+        let relay = FiberRelay::new(peers, auth_key, bind_addr);
+        assert!(relay.is_ok());
+    }
+}

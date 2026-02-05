@@ -1,0 +1,33 @@
+[workspace]
+members = [".", "fiber-sidecar"]
+
+[package]
+name = "fiber-zcash"
+version = "0.1.0"
+edition = "2021"
+description = "Low-latency block relay network for Zcash"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zmanian/fiber-zcash"
+
+[dependencies]
+thiserror = "1.0"
+hex = "0.4"
+siphasher = "1.0"
+reed-solomon-erasure = "6.0"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync"] }
+hmac = "0.12"
+sha2 = "0.10"
+bytes = "1.5"
+subtle = "2.5"
+tracing = "0.1"
+equihash = "0.2"
+
+[dev-dependencies]
+proptest = "1.4"
+tokio-test = "0.4"
+rand = "0.8"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "relay_bench"
+harness = false

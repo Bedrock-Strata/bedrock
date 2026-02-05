@@ -121,10 +121,7 @@ impl EquihashValidator {
         // The block hash is BLAKE2b-256 of the full header including solution
         let mut data = Vec::with_capacity(header.len() + 3 + solution.len());
         data.extend_from_slice(header);
-        // CompactSize encoding for solution length (1344 = 0xfd 0x40 0x05)
-        data.push(0xfd);
-        data.push(0x40);
-        data.push(0x05);
+        zcash_pool_common::write_compact_size(solution.len() as u64, &mut data);
         data.extend_from_slice(solution);
 
         let hash = Params::new()

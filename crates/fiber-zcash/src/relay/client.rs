@@ -247,13 +247,13 @@ impl RelayClient {
         Ok(())
     }
 
-    /// Compute a simple block hash from header
+    /// Compute block hash from header using double-SHA256, matching
+    /// `CompactBlock::header_hash()` and `CompactBlockBuilder::compute_header_hash()`.
     fn compute_block_hash(&self, block: &CompactBlock) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(&block.header);
-        let result = hasher.finalize();
+        let first = Sha256::digest(&block.header);
+        let second = Sha256::digest(first);
         let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
+        hash.copy_from_slice(&second);
         hash
     }
 

@@ -206,67 +206,12 @@ fn merkle_root_from_txids(txids: &[[u8; 32]]) -> [u8; 32] {
 }
 
 fn read_compact_size(data: &[u8], cursor: &mut usize) -> Result<u64> {
-    if *cursor >= data.len() {
-        return Err(JdClientError::Protocol("compact size out of bounds".to_string()));
-    }
-    let prefix = data[*cursor];
-    *cursor += 1;
-    match prefix {
-        n @ 0x00..=0xfc => Ok(n as u64),
-        0xfd => {
-            if *cursor + 2 > data.len() {
-                return Err(JdClientError::Protocol("compact size u16 out of bounds".to_string()));
-            }
-            let val = u16::from_le_bytes([data[*cursor], data[*cursor + 1]]) as u64;
-            *cursor += 2;
-            Ok(val)
-        }
-        0xfe => {
-            if *cursor + 4 > data.len() {
-                return Err(JdClientError::Protocol("compact size u32 out of bounds".to_string()));
-            }
-            let val = u32::from_le_bytes([
-                data[*cursor],
-                data[*cursor + 1],
-                data[*cursor + 2],
-                data[*cursor + 3],
-            ]) as u64;
-            *cursor += 4;
-            Ok(val)
-        }
-        0xff => {
-            if *cursor + 8 > data.len() {
-                return Err(JdClientError::Protocol("compact size u64 out of bounds".to_string()));
-            }
-            let val = u64::from_le_bytes([
-                data[*cursor],
-                data[*cursor + 1],
-                data[*cursor + 2],
-                data[*cursor + 3],
-                data[*cursor + 4],
-                data[*cursor + 5],
-                data[*cursor + 6],
-                data[*cursor + 7],
-            ]);
-            *cursor += 8;
-            Ok(val)
-        }
-    }
+    zcash_pool_common::read_compact_size(data, cursor)
+        .map_err(|e| JdClientError::Protocol(e.to_string()))
 }
 
 fn write_compact_size(value: u64, out: &mut Vec<u8>) {
-    if value < 0xfd {
-        out.push(value as u8);
-    } else if value <= 0xffff {
-        out.push(0xfd);
-        out.extend_from_slice(&(value as u16).to_le_bytes());
-    } else if value <= 0xffff_ffff {
-        out.push(0xfe);
-        out.extend_from_slice(&(value as u32).to_le_bytes());
-    } else {
-        out.push(0xff);
-        out.extend_from_slice(&value.to_le_bytes());
-    }
+    zcash_pool_common::write_compact_size(value, out);
 }
 
 fn parse_coinbase_outputs(tx: &[u8]) -> Result<CoinbaseOutputs> {

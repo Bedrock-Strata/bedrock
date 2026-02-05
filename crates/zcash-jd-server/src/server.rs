@@ -297,6 +297,9 @@ impl JdServer {
         // For now, just record a share for the miner
         // In production, the miner ID would come from the session/token
         let miner_id = format!("jd-miner-{}", solution.channel_id);
+        // SECURITY WARNING: Difficulty is not validated.
+        // In production, compute actual difficulty from solution hash vs network target.
+        tracing::warn!("Recording share with unvalidated difficulty - NOT SAFE FOR PRODUCTION");
         self.payout_tracker.record_share(&miner_id, 1.0);
 
         info!(

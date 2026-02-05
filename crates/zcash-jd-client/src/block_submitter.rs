@@ -69,18 +69,12 @@ impl BlockSubmitter {
         block.extend_from_slice(header);
 
         // Equihash solution length (compactSize) + solution
-        block.push(0xfd);
-        block.extend_from_slice(&(1344u16).to_le_bytes());
+        zcash_pool_common::write_compact_size(solution.len() as u64, &mut block);
         block.extend_from_slice(solution);
 
         // Transaction count (compactSize)
         let tx_count = 1 + transactions.len();
-        if tx_count < 0xfd {
-            block.push(tx_count as u8);
-        } else {
-            block.push(0xfd);
-            block.extend_from_slice(&(tx_count as u16).to_le_bytes());
-        }
+        zcash_pool_common::write_compact_size(tx_count as u64, &mut block);
 
         // Coinbase transaction
         block.extend_from_slice(coinbase_tx);

@@ -42,6 +42,15 @@ impl JdClientTransport {
 
                 let frame = MessageFrame::decode(&header_buf)
                     .map_err(|e| JdClientError::Protocol(e.to_string()))?;
+
+                const MAX_FRAME_SIZE: usize = 1_048_576;
+                if frame.length as usize > MAX_FRAME_SIZE {
+                    return Err(JdClientError::Protocol(format!(
+                        "frame too large: {} bytes (max {})",
+                        frame.length, MAX_FRAME_SIZE
+                    )));
+                }
+
                 let mut payload = vec![0u8; frame.length as usize];
                 if frame.length > 0 {
                     stream.read_exact(&mut payload).await?;
@@ -52,7 +61,16 @@ impl JdClientTransport {
                 Ok(Some(full_message))
             }
             JdClientTransport::Noise(stream) => match stream.read_message().await {
-                Ok(message) => Ok(Some(message)),
+                Ok(message) => {
+                    const MAX_FRAME_SIZE: usize = 1_048_576;
+                    if message.len() > MAX_FRAME_SIZE {
+                        return Err(JdClientError::Protocol(format!(
+                            "frame too large: {} bytes (max {})",
+                            message.len(), MAX_FRAME_SIZE
+                        )));
+                    }
+                    Ok(Some(message))
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
                 Err(e) => Err(JdClientError::Io(e)),
             },
@@ -524,15 +542,21 @@ impl JdClient {
 
         // Check if we need to prune the cache
         if cache.len() >= Self::MAX_TX_CACHE_ENTRIES {
-            tracing::warn!("Transaction cache entry limit reached, clearing cache");
-            cache.clear();
+            tracing::warn!("Transaction cache entry limit reached, evicting oldest half");
+            let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+            for key in to_remove {
+                cache.remove(&key);
+            }
         }
 
         // Check total byte size
         let total_bytes: usize = cache.values().map(|v| v.len()).sum();
         if total_bytes + data.len() > Self::MAX_TX_CACHE_BYTES {
-            tracing::warn!("Transaction cache byte limit reached, clearing cache");
-            cache.clear();
+            tracing::warn!("Transaction cache byte limit reached, evicting oldest half");
+            let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+            for key in to_remove {
+                cache.remove(&key);
+            }
         }
 
         cache.insert(txid, data);
@@ -545,14 +569,20 @@ impl JdClient {
 
         // Pre-check cache size
         if cache.len() >= Self::MAX_TX_CACHE_ENTRIES {
-            tracing::warn!("Transaction cache entry limit reached, clearing cache");
-            cache.clear();
+            tracing::warn!("Transaction cache entry limit reached, evicting oldest half");
+            let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+            for key in to_remove {
+                cache.remove(&key);
+            }
         }
 
         let total_bytes: usize = cache.values().map(|v| v.len()).sum();
         if total_bytes > Self::MAX_TX_CACHE_BYTES {
-            tracing::warn!("Transaction cache byte limit reached, clearing cache");
-            cache.clear();
+            tracing::warn!("Transaction cache byte limit reached, evicting oldest half");
+            let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+            for key in to_remove {
+                cache.remove(&key);
+            }
         }
 
         for (txid, data) in transactions {

@@ -15,18 +15,20 @@ pub fn assemble_header(template: &GetBlockTemplateResponse) -> Result<EquihashHe
     let prev_hash = Hash256::from_hex(&template.previous_block_hash)
         .map_err(|e| Error::InvalidTemplate(format!("invalid prev_hash: {}", e)))?;
 
-    let merkle_root = Hash256::from_hex(&template.default_roots.merkle_root)
+    // Zebra returns merkleroot, chainhistoryroot, authdataroot, blockcommitmentshash
+    // in internal byte order (little-endian hex), NOT display order.
+    let merkle_root = Hash256::from_hex_le(&template.default_roots.merkle_root)
         .map_err(|e| Error::InvalidTemplate(format!("invalid merkle_root: {}", e)))?;
 
     let hash_block_commitments = match (
-        Hash256::from_hex(&template.default_roots.chain_history_root),
-        Hash256::from_hex(&template.default_roots.auth_data_root),
+        Hash256::from_hex_le(&template.default_roots.chain_history_root),
+        Hash256::from_hex_le(&template.default_roots.auth_data_root),
     ) {
         (Ok(history_root), Ok(auth_root)) => {
             calculate_block_commitments_hash(&history_root, &auth_root)
         }
         _ => {
-            Hash256::from_hex(&template.default_roots.block_commitments_hash)
+            Hash256::from_hex_le(&template.default_roots.block_commitments_hash)
                 .map_err(|e| Error::InvalidTemplate(format!("invalid block_commitments_hash: {}", e)))?
         }
     };
@@ -53,9 +55,10 @@ pub fn assemble_header(template: &GetBlockTemplateResponse) -> Result<EquihashHe
     })
 }
 
-/// Parse target from hex string to Hash256
+/// Parse target from hex string to Hash256.
+/// Zebra returns the target in internal byte order (little-endian hex).
 pub fn parse_target(target_hex: &str) -> Result<Hash256> {
-    Hash256::from_hex(target_hex)
+    Hash256::from_hex_le(target_hex)
         .map_err(|e| Error::InvalidTemplate(format!("invalid target: {}", e)))
 }
 

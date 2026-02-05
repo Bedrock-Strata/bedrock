@@ -3,6 +3,7 @@
 use std::fmt;
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A 32-byte Curve25519 public key
 #[derive(Clone, PartialEq, Eq)]
@@ -48,11 +49,14 @@ impl fmt::Display for PublicKey {
     }
 }
 
-/// A Curve25519 keypair (public + private)
+/// A Curve25519 keypair (public + private).
+/// Private key bytes are zeroized on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Keypair {
     /// Public key (can be shared)
+    #[zeroize(skip)]
     pub public: PublicKey,
-    /// Private key (keep secret)
+    /// Private key (keep secret) - zeroized on drop
     private: [u8; 32],
 }
 

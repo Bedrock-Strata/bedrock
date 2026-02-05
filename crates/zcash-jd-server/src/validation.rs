@@ -4,6 +4,9 @@ use crate::messages::SetFullTemplateJob;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
+/// Maximum number of known txids to track before clearing
+const MAX_KNOWN_TXIDS: usize = 100_000;
+
 /// Validation strictness for full templates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidationLevel {
@@ -91,7 +94,11 @@ impl TemplateValidator {
 
     /// Update known transactions from pool's mempool
     pub fn update_known_txids(&mut self, txids: impl IntoIterator<Item = [u8; 32]>) {
-        self.known_txids.extend(txids);
+        let txids_vec: Vec<[u8; 32]> = txids.into_iter().collect();
+        if self.known_txids.len() + txids_vec.len() > MAX_KNOWN_TXIDS {
+            self.known_txids.clear();
+        }
+        self.known_txids.extend(txids_vec);
     }
 
     /// Clear known transactions
@@ -101,6 +108,9 @@ impl TemplateValidator {
 
     /// Add a single known txid
     pub fn add_known_txid(&mut self, txid: [u8; 32]) {
+        if self.known_txids.len() >= MAX_KNOWN_TXIDS {
+            self.known_txids.clear();
+        }
         self.known_txids.insert(txid);
     }
 
@@ -369,52 +379,8 @@ impl TemplateValidator {
     }
 
     fn read_compact_size(data: &[u8], cursor: &mut usize) -> Result<u64, String> {
-        if *cursor >= data.len() {
-            return Err("compact size out of bounds".into());
-        }
-        let prefix = data[*cursor];
-        *cursor += 1;
-        match prefix {
-            n @ 0x00..=0xfc => Ok(n as u64),
-            0xfd => {
-                if *cursor + 2 > data.len() {
-                    return Err("compact size u16 out of bounds".into());
-                }
-                let val = u16::from_le_bytes([data[*cursor], data[*cursor + 1]]) as u64;
-                *cursor += 2;
-                Ok(val)
-            }
-            0xfe => {
-                if *cursor + 4 > data.len() {
-                    return Err("compact size u32 out of bounds".into());
-                }
-                let val = u32::from_le_bytes([
-                    data[*cursor],
-                    data[*cursor + 1],
-                    data[*cursor + 2],
-                    data[*cursor + 3],
-                ]) as u64;
-                *cursor += 4;
-                Ok(val)
-            }
-            0xff => {
-                if *cursor + 8 > data.len() {
-                    return Err("compact size u64 out of bounds".into());
-                }
-                let val = u64::from_le_bytes([
-                    data[*cursor],
-                    data[*cursor + 1],
-                    data[*cursor + 2],
-                    data[*cursor + 3],
-                    data[*cursor + 4],
-                    data[*cursor + 5],
-                    data[*cursor + 6],
-                    data[*cursor + 7],
-                ]);
-                *cursor += 8;
-                Ok(val)
-            }
-        }
+        zcash_pool_common::read_compact_size(data, cursor)
+            .map_err(|e| e.to_string())
     }
 
     fn compute_txid(data: &[u8]) -> [u8; 32] {

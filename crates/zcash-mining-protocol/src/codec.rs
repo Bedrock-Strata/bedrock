@@ -7,10 +7,14 @@
 
 use crate::error::{ProtocolError, Result};
 use crate::messages::{
-    message_types, NewEquihashJob, SubmitEquihashShare,
+    message_types, NewEquihashJob, RejectReason, SetTarget, ShareResult, SubmitEquihashShare,
+    SubmitSharesResponse,
 };
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
+
+/// Maximum payload size for a single message frame (1 MB).
+pub const MAX_FRAME_PAYLOAD: u32 = 1_048_576;
 
 /// Message frame header
 #[derive(Debug, Clone)]
@@ -50,6 +54,13 @@ impl MessageFrame {
         let mut len_bytes = [0u8; 4];
         len_bytes[0..3].copy_from_slice(&data[3..6]);
         let length = u32::from_le_bytes(len_bytes);
+
+        if length > MAX_FRAME_PAYLOAD {
+            return Err(ProtocolError::EncodingError(format!(
+                "frame payload {} exceeds maximum of {} bytes",
+                length, MAX_FRAME_PAYLOAD
+            )));
+        }
 
         Ok(Self {
             extension_type,
@@ -327,6 +338,226 @@ impl Decodable for SubmitEquihashShare {
     }
 }
 
+/// Share result encoding constants
+mod share_result_codes {
+    pub const ACCEPTED: u8 = 0x00;
+    pub const REJECTED: u8 = 0x01;
+}
+
+/// Reject reason encoding constants
+mod reject_reason_codes {
+    pub const STALE_JOB: u8 = 0x00;
+    pub const DUPLICATE: u8 = 0x01;
+    pub const INVALID_SOLUTION: u8 = 0x02;
+    pub const LOW_DIFFICULTY: u8 = 0x03;
+    pub const OTHER: u8 = 0xFF;
+}
+
+/// Encode a SubmitSharesResponse message
+pub fn encode_submit_shares_response(resp: &SubmitSharesResponse) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+
+    payload.write_u32::<LittleEndian>(resp.channel_id).unwrap();
+    payload.write_u32::<LittleEndian>(resp.sequence_number).unwrap();
+
+    match &resp.result {
+        ShareResult::Accepted => {
+            payload.write_u8(share_result_codes::ACCEPTED).unwrap();
+        }
+        ShareResult::Rejected(reason) => {
+            payload.write_u8(share_result_codes::REJECTED).unwrap();
+            match reason {
+                RejectReason::StaleJob => {
+                    payload.write_u8(reject_reason_codes::STALE_JOB).unwrap();
+                }
+                RejectReason::Duplicate => {
+                    payload.write_u8(reject_reason_codes::DUPLICATE).unwrap();
+                }
+                RejectReason::InvalidSolution => {
+                    payload.write_u8(reject_reason_codes::INVALID_SOLUTION).unwrap();
+                }
+                RejectReason::LowDifficulty => {
+                    payload.write_u8(reject_reason_codes::LOW_DIFFICULTY).unwrap();
+                }
+                RejectReason::Other(msg) => {
+                    payload.write_u8(reject_reason_codes::OTHER).unwrap();
+                    let msg_bytes = msg.as_bytes();
+                    let len = msg_bytes.len().min(255);
+                    payload.write_u8(len as u8).unwrap();
+                    payload.write_all(&msg_bytes[..len]).unwrap();
+                }
+            }
+        }
+    }
+
+    let frame = MessageFrame {
+        extension_type: 0,
+        msg_type: message_types::SUBMIT_SHARES_RESPONSE,
+        length: payload.len() as u32,
+    };
+
+    let mut result = frame.encode().to_vec();
+    result.extend(payload);
+    Ok(result)
+}
+
+/// Decode a SubmitSharesResponse message
+pub fn decode_submit_shares_response(data: &[u8]) -> Result<SubmitSharesResponse> {
+    let frame = MessageFrame::decode(data)?;
+    if frame.msg_type != message_types::SUBMIT_SHARES_RESPONSE {
+        return Err(ProtocolError::InvalidMessageType(frame.msg_type));
+    }
+
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(ProtocolError::MessageTooShort {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+    if data.len() > total_len {
+        return Err(ProtocolError::EncodingError("trailing bytes in message".into()));
+    }
+
+    let payload = &data[MessageFrame::HEADER_SIZE..total_len];
+    let mut cursor = Cursor::new(payload);
+
+    let channel_id = cursor.read_u32::<LittleEndian>().map_err(|e| {
+        ProtocolError::EncodingError(e.to_string())
+    })?;
+    let sequence_number = cursor.read_u32::<LittleEndian>().map_err(|e| {
+        ProtocolError::EncodingError(e.to_string())
+    })?;
+    let result_code = cursor.read_u8().map_err(|e| {
+        ProtocolError::EncodingError(e.to_string())
+    })?;
+
+    let result = match result_code {
+        share_result_codes::ACCEPTED => ShareResult::Accepted,
+        share_result_codes::REJECTED => {
+            let reason_code = cursor.read_u8().map_err(|e| {
+                ProtocolError::EncodingError(e.to_string())
+            })?;
+            let reason = match reason_code {
+                reject_reason_codes::STALE_JOB => RejectReason::StaleJob,
+                reject_reason_codes::DUPLICATE => RejectReason::Duplicate,
+                reject_reason_codes::INVALID_SOLUTION => RejectReason::InvalidSolution,
+                reject_reason_codes::LOW_DIFFICULTY => RejectReason::LowDifficulty,
+                reject_reason_codes::OTHER => {
+                    let msg_len = cursor.read_u8().map_err(|e| {
+                        ProtocolError::EncodingError(e.to_string())
+                    })? as usize;
+                    let mut msg_bytes = vec![0u8; msg_len];
+                    cursor.read_exact(&mut msg_bytes).map_err(|e| {
+                        ProtocolError::EncodingError(e.to_string())
+                    })?;
+                    let msg = String::from_utf8(msg_bytes).map_err(|e| {
+                        ProtocolError::EncodingError(format!("invalid UTF-8 in reject reason: {}", e))
+                    })?;
+                    RejectReason::Other(msg)
+                }
+                _ => {
+                    return Err(ProtocolError::EncodingError(format!(
+                        "unknown reject reason code: {}",
+                        reason_code
+                    )));
+                }
+            };
+            ShareResult::Rejected(reason)
+        }
+        _ => {
+            return Err(ProtocolError::EncodingError(format!(
+                "unknown share result code: {}",
+                result_code
+            )));
+        }
+    };
+
+    Ok(SubmitSharesResponse {
+        channel_id,
+        sequence_number,
+        result,
+    })
+}
+
+/// Encode a SetTarget message
+pub fn encode_set_target(msg: &SetTarget) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+
+    payload.write_u32::<LittleEndian>(msg.channel_id).unwrap();
+    payload.write_all(&msg.target).unwrap();
+
+    let frame = MessageFrame {
+        extension_type: 0,
+        msg_type: message_types::SET_TARGET,
+        length: payload.len() as u32,
+    };
+
+    let mut result = frame.encode().to_vec();
+    result.extend(payload);
+    Ok(result)
+}
+
+/// Decode a SetTarget message
+pub fn decode_set_target(data: &[u8]) -> Result<SetTarget> {
+    let frame = MessageFrame::decode(data)?;
+    if frame.msg_type != message_types::SET_TARGET {
+        return Err(ProtocolError::InvalidMessageType(frame.msg_type));
+    }
+
+    let total_len = MessageFrame::HEADER_SIZE + frame.length as usize;
+    if data.len() < total_len {
+        return Err(ProtocolError::MessageTooShort {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+    if data.len() > total_len {
+        return Err(ProtocolError::EncodingError("trailing bytes in message".into()));
+    }
+
+    let payload = &data[MessageFrame::HEADER_SIZE..total_len];
+    let mut cursor = Cursor::new(payload);
+
+    let channel_id = cursor.read_u32::<LittleEndian>().map_err(|e| {
+        ProtocolError::EncodingError(e.to_string())
+    })?;
+
+    let mut target = [0u8; 32];
+    cursor.read_exact(&mut target).map_err(|e| {
+        ProtocolError::EncodingError(e.to_string())
+    })?;
+
+    Ok(SetTarget {
+        channel_id,
+        target,
+    })
+}
+
+impl Encodable for SubmitSharesResponse {
+    fn encode(&self) -> Result<Vec<u8>> {
+        encode_submit_shares_response(self)
+    }
+}
+
+impl Decodable for SubmitSharesResponse {
+    fn decode(data: &[u8]) -> Result<Self> {
+        decode_submit_shares_response(data)
+    }
+}
+
+impl Encodable for SetTarget {
+    fn encode(&self) -> Result<Vec<u8>> {
+        encode_set_target(self)
+    }
+}
+
+impl Decodable for SetTarget {
+    fn decode(data: &[u8]) -> Result<Self> {
+        decode_set_target(data)
+    }
+}
+
 /// Convenience functions for generic encode/decode
 pub fn encode_message<T: Encodable>(msg: &T) -> Result<Vec<u8>> {
     msg.encode()
@@ -345,7 +576,7 @@ mod tests {
         let frame = MessageFrame {
             extension_type: 0x1234,
             msg_type: 0x20,
-            length: 0x123456,
+            length: 100,
         };
 
         let encoded = frame.encode();
@@ -354,5 +585,107 @@ mod tests {
         assert_eq!(frame.extension_type, decoded.extension_type);
         assert_eq!(frame.msg_type, decoded.msg_type);
         assert_eq!(frame.length, decoded.length);
+    }
+
+    #[test]
+    fn test_frame_rejects_oversized_payload() {
+        let frame = MessageFrame {
+            extension_type: 0,
+            msg_type: 0x20,
+            length: MAX_FRAME_PAYLOAD + 1,
+        };
+        let encoded = frame.encode();
+        let result = MessageFrame::decode(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_shares_response_accepted_roundtrip() {
+        let resp = SubmitSharesResponse {
+            channel_id: 42,
+            sequence_number: 100,
+            result: ShareResult::Accepted,
+        };
+
+        let encoded = encode_submit_shares_response(&resp).unwrap();
+        let decoded = decode_submit_shares_response(&encoded).unwrap();
+
+        assert_eq!(resp, decoded);
+    }
+
+    #[test]
+    fn test_submit_shares_response_rejected_stale_roundtrip() {
+        let resp = SubmitSharesResponse {
+            channel_id: 1,
+            sequence_number: 5,
+            result: ShareResult::Rejected(RejectReason::StaleJob),
+        };
+
+        let encoded = encode_submit_shares_response(&resp).unwrap();
+        let decoded = decode_submit_shares_response(&encoded).unwrap();
+
+        assert_eq!(resp, decoded);
+    }
+
+    #[test]
+    fn test_submit_shares_response_rejected_other_roundtrip() {
+        let resp = SubmitSharesResponse {
+            channel_id: 3,
+            sequence_number: 77,
+            result: ShareResult::Rejected(RejectReason::Other("custom error".to_string())),
+        };
+
+        let encoded = encode_submit_shares_response(&resp).unwrap();
+        let decoded = decode_submit_shares_response(&encoded).unwrap();
+
+        assert_eq!(resp, decoded);
+    }
+
+    #[test]
+    fn test_submit_shares_response_all_reject_reasons() {
+        let reasons = vec![
+            RejectReason::StaleJob,
+            RejectReason::Duplicate,
+            RejectReason::InvalidSolution,
+            RejectReason::LowDifficulty,
+        ];
+
+        for reason in reasons {
+            let resp = SubmitSharesResponse {
+                channel_id: 1,
+                sequence_number: 1,
+                result: ShareResult::Rejected(reason.clone()),
+            };
+
+            let encoded = encode_submit_shares_response(&resp).unwrap();
+            let decoded = decode_submit_shares_response(&encoded).unwrap();
+            assert_eq!(resp, decoded);
+        }
+    }
+
+    #[test]
+    fn test_set_target_roundtrip() {
+        let msg = SetTarget {
+            channel_id: 99,
+            target: [0xab; 32],
+        };
+
+        let encoded = encode_set_target(&msg).unwrap();
+        let decoded = decode_set_target(&encoded).unwrap();
+
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_set_target_trait_roundtrip() {
+        let msg = SetTarget {
+            channel_id: 7,
+            target: [0x01; 32],
+        };
+
+        let encoded = msg.encode().unwrap();
+        let decoded = SetTarget::decode(&encoded).unwrap();
+
+        assert_eq!(msg, decoded);
     }
 }

@@ -98,6 +98,14 @@ pub enum TracingError {
 /// If `config.otlp_endpoint` is None, tracing is not initialized
 /// and the function returns early.
 ///
+/// # Mutual Exclusivity
+///
+/// This function and [`init_logging`](crate::init_logging) both call
+/// `tracing_subscriber::registry().init()`, which sets the global default
+/// subscriber. **Only one may be called per process.** Calling both will
+/// panic at runtime. Choose `init_logging` for local logging or
+/// `init_tracing` for OpenTelemetry export with logging.
+///
 /// # Arguments
 ///
 /// * `config` - Tracing configuration

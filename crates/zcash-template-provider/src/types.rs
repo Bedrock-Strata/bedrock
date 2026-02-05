@@ -7,14 +7,25 @@ use serde::Deserialize;
 pub struct Hash256(pub [u8; 32]);
 
 impl Hash256 {
+    /// Parse from display-order hex (big-endian, as used by `previousblockhash`).
+    /// Reverses bytes to convert from display order to internal little-endian order.
     pub fn from_hex(s: &str) -> Result<Self, hex::FromHexError> {
         let mut bytes = [0u8; 32];
         hex::decode_to_slice(s, &mut bytes)?;
-        // Zcash RPC returns hashes in little-endian display order
         bytes.reverse();
         Ok(Self(bytes))
     }
 
+    /// Parse from internal-order hex (little-endian, as used by Zebra's
+    /// `merkleroot`, `chainhistoryroot`, `authdataroot`, `blockcommitmentshash`).
+    /// Does NOT reverse bytes -- hex is already in internal byte order.
+    pub fn from_hex_le(s: &str) -> Result<Self, hex::FromHexError> {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(s, &mut bytes)?;
+        Ok(Self(bytes))
+    }
+
+    /// Encode as display-order hex (big-endian, reversed from internal).
     pub fn to_hex(&self) -> String {
         let mut bytes = self.0;
         bytes.reverse();

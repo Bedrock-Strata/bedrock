@@ -42,6 +42,14 @@ impl FromStr for LogFormat {
 /// Sets up tracing with the specified format and default log level.
 /// The log level can be overridden via the `RUST_LOG` environment variable.
 ///
+/// # Mutual Exclusivity
+///
+/// This function and [`init_tracing`](crate::init_tracing) both call
+/// `tracing_subscriber::registry().init()`, which sets the global default
+/// subscriber. **Only one may be called per process.** Calling both will
+/// panic at runtime. Choose `init_logging` for local logging or
+/// `init_tracing` for OpenTelemetry export with logging.
+///
 /// # Arguments
 ///
 /// * `format` - Output format (Pretty or Json)

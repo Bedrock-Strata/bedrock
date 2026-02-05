@@ -262,7 +262,7 @@ impl PoolServer {
         let tp = Arc::clone(&self.template_provider);
         tokio::spawn(async move {
             if let Err(e) = tp.run().await {
-                error!("Template provider error: {}", e);
+                error!("CRITICAL: Template provider terminated: {}. Pool will serve stale jobs until restarted.", e);
             }
         });
 
@@ -605,9 +605,8 @@ impl PoolServer {
                 Ok(()) => false,
                 Err(e) => {
                     debug!("Session {} ended: {}", channel_id, e);
-                    // Check if this looks like a decryption error
-                    e.to_string().contains("decrypt")
-                        || e.to_string().contains("InvalidData")
+                    // Check if this is a decryption error using error variant
+                    matches!(&e, PoolError::Io(io_err) if io_err.kind() == std::io::ErrorKind::InvalidData)
                 }
             };
 
@@ -701,28 +700,34 @@ impl PoolServer {
 
     /// Broadcast new jobs to all connected sessions
     async fn broadcast_jobs(&self, clean_jobs: bool) -> Result<()> {
-        let sessions = self.sessions.read().await;
-        let distributor = self.job_distributor.read().await;
+        // Collect senders and jobs while holding locks, then drop locks before sending
+        let jobs_to_send = {
+            let sessions = self.sessions.read().await;
+            let distributor = self.job_distributor.read().await;
 
-        if !distributor.has_template() {
-            return Ok(());
-        }
+            if !distributor.has_template() {
+                return Ok(());
+            }
 
-        let mut broadcast_count = 0;
-        let mut jobs_to_send: Vec<(mpsc::Sender<ServerMessage>, NewEquihashJob)> = Vec::new();
+            let mut jobs: Vec<(mpsc::Sender<ServerMessage>, NewEquihashJob)> = Vec::new();
 
-        {
-            let mut channels = self.channels.write().await;
-            for (&channel_id, sender) in sessions.iter() {
-                if let Some(channel) = channels.get_mut(&channel_id) {
-                    if let Some(job) = distributor.create_job(channel, clean_jobs) {
-                        channel.add_job(job.clone(), clean_jobs);
-                        jobs_to_send.push((sender.clone(), job));
+            {
+                let mut channels = self.channels.write().await;
+                for (&channel_id, sender) in sessions.iter() {
+                    if let Some(channel) = channels.get_mut(&channel_id) {
+                        if let Some(job) = distributor.create_job(channel, clean_jobs) {
+                            channel.add_job(job.clone(), clean_jobs);
+                            jobs.push((sender.clone(), job));
+                        }
                     }
                 }
             }
-        }
 
+            jobs
+        };
+        // sessions and distributor locks are now dropped
+
+        let mut broadcast_count = 0;
         for (sender, job) in jobs_to_send {
             if sender.send(ServerMessage::NewJob(job)).await.is_ok() {
                 broadcast_count += 1;
@@ -1045,20 +1050,7 @@ pub struct PoolStats {
     pub current_height: Option<u64>,
 }
 
-fn write_varint(value: u64, out: &mut Vec<u8>) {
-    if value < 0xfd {
-        out.push(value as u8);
-    } else if value <= 0xffff {
-        out.push(0xfd);
-        out.extend_from_slice(&(value as u16).to_le_bytes());
-    } else if value <= 0xffff_ffff {
-        out.push(0xfe);
-        out.extend_from_slice(&(value as u32).to_le_bytes());
-    } else {
-        out.push(0xff);
-        out.extend_from_slice(&value.to_le_bytes());
-    }
-}
+use zcash_pool_common::write_compact_size as write_varint;
 
 fn build_block_bytes(
     job: &NewEquihashJob,

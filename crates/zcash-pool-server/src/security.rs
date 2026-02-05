@@ -292,7 +292,10 @@ impl ConnectionTracker {
     /// Record a new connection
     pub fn on_connect(&self, addr: SocketAddr) -> Instant {
         let now = Instant::now();
-        let mut connections = self.connections.write().unwrap();
+        let mut connections = self.connections.write().unwrap_or_else(|e| {
+            warn!("ConnectionTracker lock poisoned in on_connect, recovering");
+            e.into_inner()
+        });
         connections.entry(addr).or_insert_with(|| ConnectionHistory {
             recent_durations: VecDeque::with_capacity(32),
             suspicious_count: 0,
@@ -314,7 +317,10 @@ impl ConnectionTracker {
         let duration = now.duration_since(connected_at);
         let is_short_lived = duration < self.short_lived_threshold;
 
-        let mut connections = self.connections.write().unwrap();
+        let mut connections = self.connections.write().unwrap_or_else(|e| {
+            warn!("ConnectionTracker lock poisoned in on_disconnect, recovering");
+            e.into_inner()
+        });
         let history = match connections.get_mut(&addr) {
             Some(h) => h,
             None => return false,
@@ -379,7 +385,10 @@ impl ConnectionTracker {
     pub fn is_flagged(&self, addr: &SocketAddr) -> bool {
         self.connections
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| {
+                warn!("ConnectionTracker lock poisoned in is_flagged, recovering");
+                e.into_inner()
+            })
             .get(addr)
             .map(|h| h.is_flagged)
             .unwrap_or(false)
@@ -387,14 +396,20 @@ impl ConnectionTracker {
 
     /// Clear flag for an address (manual reset)
     pub fn clear_flag(&self, addr: &SocketAddr) {
-        if let Some(history) = self.connections.write().unwrap().get_mut(addr) {
+        if let Some(history) = self.connections.write().unwrap_or_else(|e| {
+            warn!("ConnectionTracker lock poisoned in clear_flag, recovering");
+            e.into_inner()
+        }).get_mut(addr) {
             history.is_flagged = false;
         }
     }
 
     /// Get statistics for an address
     pub fn get_stats(&self, addr: &SocketAddr) -> Option<ConnectionStats> {
-        let connections = self.connections.read().unwrap();
+        let connections = self.connections.read().unwrap_or_else(|e| {
+            warn!("ConnectionTracker lock poisoned in get_stats, recovering");
+            e.into_inner()
+        });
         let history = connections.get(addr)?;
 
         let total = history.recent_durations.len();
@@ -427,7 +442,10 @@ impl ConnectionTracker {
 
     /// Cleanup old entries
     pub fn cleanup(&self, max_age: Duration) {
-        let mut connections = self.connections.write().unwrap();
+        let mut connections = self.connections.write().unwrap_or_else(|e| {
+            warn!("ConnectionTracker lock poisoned in cleanup, recovering");
+            e.into_inner()
+        });
         let now = Instant::now();
 
         connections.retain(|_, history| {

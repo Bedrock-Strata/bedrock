@@ -4,7 +4,6 @@
 
 use snow::TransportState;
 use std::io;
-use std::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::trace;
@@ -12,10 +11,11 @@ use tracing::trace;
 /// Maximum message size for Noise transport (64KB - overhead)
 const MAX_MESSAGE_SIZE: usize = 65535 - 16; // 16 bytes for AEAD tag
 
-/// Encrypted stream wrapper
+/// Encrypted stream wrapper.
+/// Since all methods take `&mut self`, no interior mutability (Mutex) is needed.
 pub struct NoiseStream<S> {
     inner: S,
-    transport: Mutex<TransportState>,
+    transport: TransportState,
 }
 
 impl<S> NoiseStream<S> {
@@ -23,7 +23,7 @@ impl<S> NoiseStream<S> {
     pub fn new(inner: S, transport: TransportState) -> Self {
         Self {
             inner,
-            transport: Mutex::new(transport),
+            transport,
         }
     }
 
@@ -58,13 +58,9 @@ impl NoiseStream<TcpStream> {
 
         // Decrypt
         let mut plaintext = vec![0u8; len];
-        let plaintext_len = {
-            // Handle lock poisoning gracefully - continue operating even if another thread panicked
-            let mut transport = self.transport.lock().unwrap_or_else(|e| e.into_inner());
-            transport
-                .read_message(&ciphertext, &mut plaintext)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
-        };
+        let plaintext_len = self.transport
+            .read_message(&ciphertext, &mut plaintext)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         plaintext.truncate(plaintext_len);
         trace!("Decrypted message: {} bytes", plaintext_len);
@@ -82,13 +78,9 @@ impl NoiseStream<TcpStream> {
 
         // Encrypt
         let mut ciphertext = vec![0u8; plaintext.len() + 16]; // AEAD tag
-        let ciphertext_len = {
-            // Handle lock poisoning gracefully - continue operating even if another thread panicked
-            let mut transport = self.transport.lock().unwrap_or_else(|e| e.into_inner());
-            transport
-                .write_message(plaintext, &mut ciphertext)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
-        };
+        let ciphertext_len = self.transport
+            .write_message(plaintext, &mut ciphertext)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Write with length prefix
         self.inner.write_u16(ciphertext_len as u16).await?;

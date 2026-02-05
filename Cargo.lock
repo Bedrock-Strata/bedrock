@@ -3612,6 +3612,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zcash-mining-protocol",
+ "zcash-pool-common",
  "zcash-template-provider",
 ]
 
@@ -3633,6 +3634,7 @@ dependencies = [
  "zcash-equihash-validator",
  "zcash-jd-server",
  "zcash-mining-protocol",
+ "zcash-pool-common",
  "zcash-stratum-noise",
  "zcash-template-provider",
 ]
@@ -3704,6 +3706,7 @@ dependencies = [
  "tokio",
  "tracing",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

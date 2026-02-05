@@ -13,6 +13,7 @@ fn test_vardiff_creation() {
 fn test_vardiff_adjusts_up_on_fast_shares() {
     let config = VardiffConfig {
         target_shares_per_minute: 6.0,
+        initial_difficulty: 1.0,
         min_difficulty: 1.0,
         max_difficulty: 1_000_000.0,
         retarget_interval: Duration::from_millis(50), // Very short for testing
@@ -42,6 +43,7 @@ fn test_vardiff_adjusts_up_on_fast_shares() {
 fn test_vardiff_adjusts_down_on_slow_shares() {
     let config = VardiffConfig {
         target_shares_per_minute: 60.0, // Expect 1 share per second
+        initial_difficulty: 1.0,
         min_difficulty: 1.0,
         max_difficulty: 1_000_000.0,
         retarget_interval: Duration::from_millis(100), // Short interval for testing
@@ -70,6 +72,7 @@ fn test_vardiff_adjusts_down_on_slow_shares() {
 fn test_vardiff_respects_min_difficulty() {
     let config = VardiffConfig {
         target_shares_per_minute: 60.0,
+        initial_difficulty: 10.0,
         min_difficulty: 10.0,
         max_difficulty: 1_000_000.0,
         retarget_interval: Duration::from_millis(50),
@@ -89,6 +92,7 @@ fn test_vardiff_respects_min_difficulty() {
 fn test_vardiff_respects_max_difficulty() {
     let config = VardiffConfig {
         target_shares_per_minute: 60.0,
+        initial_difficulty: 1.0,
         min_difficulty: 1.0,
         max_difficulty: 100.0,
         retarget_interval: Duration::from_millis(50),
@@ -105,6 +109,7 @@ fn test_vardiff_respects_max_difficulty() {
 fn test_vardiff_stats() {
     let config = VardiffConfig {
         target_shares_per_minute: 6.0,
+        initial_difficulty: 1.0,
         min_difficulty: 1.0,
         max_difficulty: 1_000_000.0,
         retarget_interval: Duration::from_secs(60),

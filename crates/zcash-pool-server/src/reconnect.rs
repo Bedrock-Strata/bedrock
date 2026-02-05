@@ -16,6 +16,7 @@
 //! - Using exponential backoff to avoid overwhelming the network
 //! - Detecting attack patterns through connection failure analysis
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -99,7 +100,7 @@ pub struct ReconnectManager {
     /// When the last successful connection was established
     last_connected_at: Option<Instant>,
     /// Recent connection failures for pattern analysis
-    recent_failures: Vec<ConnectionFailure>,
+    recent_failures: VecDeque<ConnectionFailure>,
     /// Maximum failures to keep for analysis
     max_failure_history: usize,
 }
@@ -112,7 +113,7 @@ impl ReconnectManager {
             attempt_count: 0,
             current_delay: Duration::ZERO,
             last_connected_at: None,
-            recent_failures: Vec::with_capacity(100),
+            recent_failures: VecDeque::with_capacity(100),
             max_failure_history: 100,
         }
     }
@@ -246,11 +247,11 @@ impl ReconnectManager {
 
     /// Record a failure for pattern analysis
     fn record_failure(&mut self, failure: ConnectionFailure) {
-        self.recent_failures.push(failure);
+        self.recent_failures.push_back(failure);
 
-        // Trim old failures
-        if self.recent_failures.len() > self.max_failure_history {
-            self.recent_failures.remove(0);
+        // Trim old failures (O(1) with VecDeque)
+        while self.recent_failures.len() > self.max_failure_history {
+            self.recent_failures.pop_front();
         }
     }
 

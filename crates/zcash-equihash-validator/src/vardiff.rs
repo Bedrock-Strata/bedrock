@@ -12,6 +12,8 @@ use tracing::{debug, info};
 pub struct VardiffConfig {
     /// Target shares per minute from each miner
     pub target_shares_per_minute: f64,
+    /// Initial difficulty for new miners (clamped to [min, max])
+    pub initial_difficulty: f64,
     /// Minimum allowed difficulty
     pub min_difficulty: f64,
     /// Maximum allowed difficulty
@@ -27,6 +29,7 @@ impl Default for VardiffConfig {
         Self {
             // For Equihash ASICs (~420 KSol/s), target 4-6 shares/min
             target_shares_per_minute: 5.0,
+            initial_difficulty: 1.0,
             min_difficulty: 1.0,
             max_difficulty: 1_000_000_000.0,
             retarget_interval: Duration::from_secs(60),
@@ -49,8 +52,12 @@ impl VardiffController {
     /// Create a new vardiff controller
     pub fn new(config: VardiffConfig) -> Self {
         let now = Instant::now();
+        let initial = config.initial_difficulty.clamp(
+            config.min_difficulty,
+            config.max_difficulty,
+        );
         Self {
-            current_difficulty: config.min_difficulty,
+            current_difficulty: initial,
             config,
             shares_since_retarget: 0,
             last_retarget: now,

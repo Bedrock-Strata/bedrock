@@ -82,16 +82,14 @@ pub fn compact_to_target(compact: u32) -> Target {
     let mut target = [0u8; 32];
 
     if exponent <= 3 {
-        // Mantissa fits in lower bytes
+        // Mantissa fits in lower bytes: shift right to discard bytes that
+        // fall below byte index 0
         let shift = 3 - exponent;
         let value = mantissa >> (8 * shift);
+        // Always write all 3 bytes; upper bytes will be zero if shifted away
         target[0] = (value & 0xff) as u8;
-        if exponent >= 2 {
-            target[1] = ((value >> 8) & 0xff) as u8;
-        }
-        if exponent >= 3 {
-            target[2] = ((value >> 16) & 0xff) as u8;
-        }
+        target[1] = ((value >> 8) & 0xff) as u8;
+        target[2] = ((value >> 16) & 0xff) as u8;
     } else {
         // Place mantissa at exponent-3 position
         let pos = exponent - 3;

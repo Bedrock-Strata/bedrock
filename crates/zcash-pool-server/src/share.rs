@@ -90,18 +90,9 @@ impl ShareProcessor {
         // Update time if miner changed it
         header[100..104].copy_from_slice(&share.time.to_le_bytes());
 
-        // 3. Verify Equihash solution
-        if let Err(e) = self.validator.verify_solution(&header, &share.solution) {
-            debug!("Invalid solution: {}", e);
-            return Ok(ShareValidationResult {
-                accepted: false,
-                result: ShareResult::Rejected(RejectReason::InvalidSolution),
-                difficulty: None,
-                is_block: false,
-            });
-        }
-
-        // 4. Check share meets pool target
+        // 3. Verify Equihash solution AND check share meets pool target.
+        //    verify_share calls verify_solution internally, so we only call it
+        //    once to avoid the expensive (~144 MB) duplicate Equihash verification.
         let share_target = &job.target;
         match self.validator.verify_share(&header, &share.solution, share_target) {
             Ok(hash) => {
@@ -123,11 +114,20 @@ impl ShareProcessor {
                     is_block,
                 })
             }
-            Err(_) => {
+            Err(zcash_equihash_validator::ValidationError::TargetNotMet) => {
                 debug!("Share below target difficulty");
                 Ok(ShareValidationResult {
                     accepted: false,
                     result: ShareResult::Rejected(RejectReason::LowDifficulty),
+                    difficulty: None,
+                    is_block: false,
+                })
+            }
+            Err(e) => {
+                debug!("Invalid solution: {}", e);
+                Ok(ShareValidationResult {
+                    accepted: false,
+                    result: ShareResult::Rejected(RejectReason::InvalidSolution),
                     difficulty: None,
                     is_block: false,
                 })

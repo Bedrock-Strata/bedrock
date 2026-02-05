@@ -382,9 +382,13 @@ impl PushSolution {
         }
     }
 
-    /// Validate solution length (always true for fixed-size array)
+    /// Validate solution length
+    ///
+    /// Note: This always returns true since `solution` is a fixed-size
+    /// `[u8; 1344]` array. Retained for API compatibility.
     pub fn validate_solution_len(&self) -> bool {
-        self.solution.len() == Self::SOLUTION_SIZE
+        // Compile-time guarantee: solution is always SOLUTION_SIZE bytes
+        true
     }
 }
 

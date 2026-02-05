@@ -22,4 +22,3 @@ blake2b_simd = "1.0"
 byteorder = "1.5"
 equihash = "0.2"
 sha2 = "0.10"
-fiber-zcash = { path = "../fiber-zcash" }

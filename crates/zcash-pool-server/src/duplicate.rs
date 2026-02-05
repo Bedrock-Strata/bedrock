@@ -48,13 +48,14 @@ impl InMemoryDuplicateDetector {
         }
     }
 
-    /// Compute a fast hash of the share data
+    /// Compute a collision-resistant hash of the share data using SipHash.
+    ///
+    /// SipHash (Rust's default hasher) provides collision resistance unlike
+    /// FxHasher, preventing attackers from crafting shares that hash-collide.
     fn hash_share(nonce_2: &[u8], solution: &[u8]) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut hasher = rustc_hash::FxHasher::default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
         nonce_2.hash(&mut hasher);
-        // Hash the full solution to prevent collision attacks
-        // FxHasher is fast enough that hashing 1344 bytes is negligible
         solution.hash(&mut hasher);
         hasher.finish()
     }

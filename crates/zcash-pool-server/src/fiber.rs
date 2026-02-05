@@ -180,13 +180,14 @@ impl FiberRelay {
         ))
     }
 
-    /// Compute double-SHA256 header hash
+    /// Compute BLAKE2b-256 header hash with Zcash personalization
     fn compute_header_hash(&self, header: &[u8]) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let first = Sha256::digest(header);
-        let second = Sha256::digest(first);
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&second);
-        hash
+        let hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"ZcashBlockHash\0\0")
+            .hash(header);
+        let mut result = [0u8; 32];
+        result.copy_from_slice(hash.as_bytes());
+        result
     }
 }

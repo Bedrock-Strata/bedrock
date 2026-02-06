@@ -1,58 +1,159 @@
-# Stratum V2 for Zcash
+# zcash-mining-infra
 
-Implementation of Stratum V2 mining protocol for Zcash with support for decentralized block template construction.
+Zcash mining infrastructure: a Stratum V2 pool server, Job Declaration protocol for miner-controlled transaction selection, Noise Protocol encryption, compact block relay with forward error correction, and production observability.
 
-## Project Status
+Built for Zcash's Equihash (200,9) consensus -- 140-byte headers, 1,344-byte solutions, and 32-byte nonces.
 
-- Phase 1: Zcash Template Provider - **Complete**
-- Phase 2: Equihash Mining Protocol - **Complete**
-- Phase 3: Pool Server MVP - **Complete**
-- Phase 4: Job Declaration Protocol - **Complete**
-- Phase 5: Security & Observability - **Complete**
-- Phase 6: Full-Template Mode - **Complete**
+## Architecture
+
+```
+zcash-pool-server (main orchestrator)
+|-- zcash-template-provider     Fetches templates from Zebra RPC
+|-- zcash-mining-protocol       Binary message codec (NewEquihashJob, SubmitEquihashShare)
+|-- zcash-equihash-validator    Share validation + adaptive difficulty (vardiff)
+|-- zcash-pool-common           Shared types (PayoutTracker, CompactSize)
+|-- zcash-jd-server             Job Declaration Server (miner-controlled templates)
+|-- zcash-stratum-noise         Noise_NK encryption (X25519 + ChaCha20-Poly1305)
+|-- zcash-stratum-observability Prometheus metrics, structured logging, OpenTelemetry
+`-- fiber-zcash                 Compact block relay with Reed-Solomon FEC
+
+zcash-jd-client (standalone binary)
+|-- zcash-template-provider
+|-- zcash-mining-protocol
+`-- local Zebra node
+
+fiber-sidecar (standalone binary)
+|-- fiber-zcash
+`-- Zebra RPC polling
+```
+
+### Data flow
+
+1. **TemplateProvider** polls Zebra's `getblocktemplate` RPC
+2. **JobDistributor** creates `NewEquihashJob` messages from templates
+3. Miners receive jobs, compute Equihash solutions, submit shares
+4. **ShareProcessor** validates solutions via **EquihashValidator**
+5. **VardiffController** adjusts per-miner difficulty targeting ~5 shares/min
+6. **PayoutTracker** records PPS contributions
+7. Found blocks are announced to **FiberRelay** then submitted to Zebra
 
 ## Crates
 
 | Crate | Description |
 |-------|-------------|
-| `zcash-template-provider` | Template Provider interfacing with Zebra |
-| `zcash-mining-protocol` | SV2 message types for Equihash mining |
-| `zcash-equihash-validator` | Share validation and vardiff |
-| `zcash-pool-server` | Pool server accepting miner connections |
-| `zcash-pool-common` | Shared types for pool components (PPS tracking) |
-| `zcash-jd-server` | Job Declaration Server for custom mining jobs |
-| `zcash-jd-client` | Job Declaration Client for decentralized templates |
-| `zcash-stratum-noise` | Noise Protocol encryption |
-| `zcash-stratum-observability` | Metrics, logging, tracing |
+| `zcash-pool-server` | Pool server: accepts miner connections, distributes jobs, validates shares, tracks payouts |
+| `zcash-template-provider` | Fetches block templates from Zebra via JSON-RPC with longpoll caching |
+| `zcash-mining-protocol` | Zcash Stratum V2 binary message types and codec with frame validation |
+| `zcash-equihash-validator` | Equihash solution validation and adaptive difficulty controller |
+| `zcash-pool-common` | Shared types: PPS payout tracker, CompactSize encoding |
+| `zcash-jd-server` | Job Declaration Server for Coinbase-Only and Full-Template mining modes |
+| `zcash-jd-client` | Job Declaration Client binary for decentralized template construction |
+| `zcash-stratum-noise` | Noise_NK encryption with X25519 key exchange and zeroized key material |
+| `zcash-stratum-observability` | Prometheus metrics, JSON logging, OpenTelemetry tracing |
+| `fiber-zcash` | Low-latency compact block relay (BIP 152 adapted) with Reed-Solomon FEC |
+| `fiber-sidecar` | Sidecar binary for integrating Fiber relay into existing pools |
 
 ## Building
 
 ```bash
-cargo build --release
+cargo build --release           # Build all crates
+cargo build -p zcash-pool-server  # Build specific crate
+cargo check                      # Fast type checking
+cargo clippy                     # Lint checks
 ```
 
 ## Testing
 
 ```bash
-cargo test
+cargo test                       # Run all tests
+cargo test -p fiber-zcash        # Test specific crate
 ```
 
-## Examples
+## Running
+
+### Pool server
+
+Requires a running [Zebra](https://github.com/ZcashFoundation/zebra) node with RPC enabled on port 8232.
 
 ```bash
-# Fetch a template from Zebra
-cargo run --example fetch_template -p zcash-template-provider
-
-# Demonstrate share validation
-cargo run --example validate_share -p zcash-equihash-validator
-
-# Run the pool server (requires Zebra node)
 cargo run --example run_pool -p zcash-pool-server
 ```
 
-## Architecture
+### Job Declaration Client
 
-See [docs/plans/](docs/plans/) for the full implementation plans.
+Allows miners to construct their own block templates for decentralized transaction selection.
+
+```bash
+cargo run -p zcash-jd-client -- \
+    --zebra-url http://127.0.0.1:8232 \
+    --pool-jd-addr 127.0.0.1:3334
+```
+
+### Fiber Sidecar
+
+Bridges existing pools to the Fiber compact block relay network.
+
+```bash
+cp crates/fiber-sidecar/config.example.toml config.toml
+# Edit config.toml with your relay peers and auth key
+cargo run -p fiber-sidecar -- --config config.toml
+```
+
+### Examples
+
+```bash
+cargo run --example fetch_template -p zcash-template-provider  # Fetch template from Zebra
+cargo run --example validate_share -p zcash-equihash-validator # Share validation demo
+```
+
+## Configuration
+
+Pool server configuration (see `crates/zcash-pool-server/src/config.rs`):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `listen_addr` | `0.0.0.0:3333` | TCP bind address for miner connections |
+| `zebra_url` | `http://127.0.0.1:8232` | Zebra RPC endpoint |
+| `nonce_1_len` | 4 | Pool nonce prefix length (bytes) |
+| `initial_difficulty` | 1.0 | Starting share difficulty |
+| `target_shares_per_minute` | 5.0 | Vardiff target rate |
+| `noise_enabled` | false | Enable Noise_NK encryption |
+| `jd_listen_addr` | None | Job Declaration port (e.g. `0.0.0.0:3334`) |
+| `fiber_relay_enabled` | false | Enable compact block relay |
+| `metrics_addr` | None | Prometheus metrics endpoint |
+
+## Job Declaration Modes
+
+The JD protocol supports two modes for miner-controlled block construction:
+
+- **Coinbase-Only**: Miner customizes the coinbase transaction output; pool provides the transaction list. Lower overhead, compatible with most setups.
+- **Full-Template**: Miner selects all transactions in the block. Maximum decentralization and censorship resistance, requires the miner to run a Zebra node.
+
+## Security
+
+- **Noise_NK encryption** prevents StraTap, BiteCoin, and ISP Log attacks
+- **Replay protection** via per-channel sequence validation
+- **EROSION attack detection** through short-lived connection tracking
+- **Timing attack mitigation** with configurable response jitter
+- **Key material** zeroized on drop
+
+See `docs/security/stratum-v2-attack-analysis.md` for the full threat model.
+
+## Documentation
+
+- `docs/stratum-v2-planning.md` -- Technical design and rationale
+- `docs/plans/` -- Implementation phase plans
+- `docs/integration/pool-operator-guide.md` -- Setting up a pool
+- `docs/integration/miner-quickstart.md` -- Connect to a pool in 5 minutes
+- `docs/integration/jd-client-guide.md` -- Running the JD Client
+- `docs/integration/full-template-mode.md` -- Transaction selection guide
+- `docs/integration/protocol-reference.md` -- Message format reference
+- `docs/integration/migration-from-v1.md` -- Upgrading from Stratum V1
+
+## External Dependencies
+
+- **[Zebra](https://github.com/ZcashFoundation/zebra)** -- Zcash node providing `getblocktemplate` RPC (port 8232)
+- **[equihash](https://crates.io/crates/equihash)** -- Core Equihash algorithm implementation
 
 ## License
 

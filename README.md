@@ -1,10 +1,14 @@
 # zcash-mining-infra
 
-Zcash mining infrastructure: a Stratum V2 pool server, Job Declaration protocol for miner-controlled transaction selection, Noise Protocol encryption, compact block relay with forward error correction, and production observability.
+Zcash mining infrastructure monorepo: a Stratum V2 pool server, Job Declaration protocol for miner-controlled transaction selection, Noise Protocol encryption, compact block relay with forward error correction, and production observability.
+
+This repository now reflects the merger of previously separate GitLab projects into a single workspace, including native Fiber relay support (`fiber-zcash`) and the standalone `fiber-sidecar` binary.
 
 Built for Zcash's Equihash (200,9) consensus -- 140-byte headers, 1,344-byte solutions, and 32-byte nonces.
 
 ## Architecture
+
+The workspace includes the merged Stratum/JD infrastructure crates plus Fiber relay components in one repo (`crates/*`).
 
 ```
 zcash-pool-server (main orchestrator)

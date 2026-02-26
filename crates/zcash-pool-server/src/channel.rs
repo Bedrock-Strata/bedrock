@@ -142,10 +142,20 @@ impl Channel {
         };
         self.jobs.insert(job_id, channel_job);
 
-        // Keep only last 10 jobs to bound memory
-        if self.jobs.len() > 10 {
-            let min_id = self.last_job_id.saturating_sub(10);
-            self.jobs.retain(|&id, _| id > min_id);
+        // Keep only last 10 jobs to bound memory.
+        // Evict by creation time (oldest first) rather than by job ID arithmetic,
+        // because job IDs wrap around at u32::MAX and ID-based eviction would
+        // keep stale high-ID jobs while discarding valid low-ID jobs after wrap.
+        while self.jobs.len() > 10 {
+            let oldest_id = self
+                .jobs
+                .iter()
+                .min_by_key(|(_, j)| j.created_at)
+                .map(|(&id, _)| id);
+            match oldest_id {
+                Some(id) => { self.jobs.remove(&id); }
+                None => break,
+            }
         }
     }
 
@@ -255,5 +265,53 @@ mod tests {
         channel.add_job(job2, true); // clean_jobs
         assert!(!channel.is_job_active(1)); // Old job now inactive
         assert!(channel.is_job_active(2)); // New job active
+    }
+
+    #[test]
+    fn test_job_eviction_after_id_wraparound() {
+        // Regression: old ID-based eviction used `last_job_id.saturating_sub(10)`
+        // which fails after wraparound — high-ID stale jobs survive while new
+        // low-ID jobs get evicted.
+        let mut channel = Channel::new(vec![0; 4], VardiffConfig::default()).unwrap();
+
+        let make_job = |id: u32, ch: &Channel| NewEquihashJob {
+            channel_id: ch.id,
+            job_id: id,
+            future_job: false,
+            version: 5,
+            prev_hash: [0; 32],
+            merkle_root: [0; 32],
+            block_commitments: [0; 32],
+            nonce_1: ch.nonce_1.clone(),
+            nonce_2_len: ch.nonce_2_len,
+            time: 0,
+            bits: 0,
+            target: [0xff; 32],
+            clean_jobs: false,
+        };
+
+        // Simulate pre-wraparound: add jobs with high IDs near u32::MAX
+        for i in 0..8 {
+            let id = u32::MAX - 10 + i;
+            channel.add_job(make_job(id, &channel), false);
+        }
+        assert_eq!(channel.jobs.len(), 8);
+
+        // Simulate post-wraparound: add jobs with low IDs (1, 2, 3, 4)
+        for id in 1..=4 {
+            channel.add_job(make_job(id, &channel), false);
+        }
+
+        // After 12 inserts total, eviction should have trimmed to 10.
+        assert!(channel.jobs.len() <= 10);
+
+        // The new low-ID jobs must survive — they are the most recent.
+        for id in 1..=4 {
+            assert!(
+                channel.jobs.contains_key(&id),
+                "Post-wraparound job {} was incorrectly evicted",
+                id
+            );
+        }
     }
 }

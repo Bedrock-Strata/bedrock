@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/bedrock-logo.svg" alt="Bedrock" width="200">
+</p>
+
 # zcash-mining-infra
 
 Zcash mining infrastructure monorepo: a Stratum V2 pool server, Job Declaration protocol for miner-controlled transaction selection, Noise Protocol encryption, compact block relay with forward error correction, and production observability.

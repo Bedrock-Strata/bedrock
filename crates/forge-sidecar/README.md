@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../../assets/brand/forge-logo.svg" alt="FORGE" width="180">
+</p>
+
 # FORGE Sidecar
 
 > Formerly `fiber-sidecar`.

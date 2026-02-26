@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../../assets/brand/strata-logo.svg" alt="Strata" width="180">
+</p>
+
 # bedrock-strata
 
 > Formerly `zcash-stratum-observability`.

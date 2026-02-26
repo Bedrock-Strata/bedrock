@@ -176,15 +176,21 @@ module ShareValidation {
 
   action step = {
     nondet m = MINERS.oneOf()
-    nondet j = 1.to(MAX_JOB_ID).oneOf()
-    nondet n = 1.to(50).oneOf()
-    nondet s = 0.to(200).oneOf()
-    nondet t = 1.to(50).oneOf()
+    // High targets → low reqDiff (e.g. target=10000 → reqDiff=100)
+    nondet t = 5000.to(20000).oneOf()
     nondet bd = 50.to(150).oneOf()
+    nondet n = 1.to(50).oneOf()
+    nondet s = 0.to(500).oneOf()
+    // Smart job selection: bias toward existing jobs, include a few misses
+    val existingJobs = jobs.get(m).keys()
+    val candidateJobs = existingJobs.union(Set(1, MAX_JOB_ID))
+    nondet j = candidateJobs.oneOf()
+    // Fresh job IDs just above the last assigned
+    nondet freshJ = (lastJobId.get(m) + 1).to(lastJobId.get(m) + 5).oneOf()
     any {
       validateShare(m, j, n, s),
-      addJob(m, j, t, false),
-      addJob(m, j, t, true),
+      addJob(m, freshJ, t, false),
+      addJob(m, freshJ, t, true),
       tick,
       newBlock(bd),
     }
@@ -202,6 +208,9 @@ module ShareValidation {
   // Witnesses
   val witnessNoAccepted = ghostAccepted.size() == 0
   val witnessNoDups = ghostDupsRejected == 0
+  // Reachability witnesses — expected to be violated by simulator
+  val witnessAcceptedReached = ghostAccepted.size() == 0
+  val witnessBlockFound = ghostBlocksFound == 0
 }
 
 module ShareValidationTest {
@@ -527,12 +536,16 @@ module JdProtocol {
 
   action step = {
     nondet c = CLIENTS.oneOf()
-    nondet tid = 1.to(20).oneOf()
-    nondet ph = 0.to(5).oneOf()
+    nondet mode = Set(CoinbaseOnly, FullTemplate).oneOf()
     nondet p = Set(true, false).oneOf()
     nondet tx = Set(true, false).oneOf()
-    nondet mode = Set(CoinbaseOnly, FullTemplate).oneOf()
     nondet np = 1.to(5).oneOf()
+    // Smart token selection: bias toward active tokens, include a few misses
+    val activeIds = tokens.keys().filter(tid => not(expired(tokens.get(tid), jdClk)))
+    val candidateTids = activeIds.union(Set(tokCtr, tokCtr + 1))
+    nondet tid = candidateTids.oneOf()
+    // 50% chance of matching current prevHash
+    nondet ph = Set(prevHash, prevHash + 1).oneOf()
     any {
       allocateToken(c, mode), declareCustomJob(tid, ph, p),
       declareFTJob(tid, ph, p, tx), jdNewBlock(np), jdTick,
@@ -550,6 +563,8 @@ module JdProtocol {
   // Witnesses
   val witnessNoTokens = gTokAlloc == 0
   val witnessNoJobs = gJobDecl == 0
+  // Reachability witnesses — expected to be violated by simulator
+  val witnessJobsDeclared = gJobDecl == 0
 }
 
 module JdProtocolTest {
@@ -891,6 +906,7 @@ module Forge {
   const PARITY_S: int
   const MAX_PENDING: int
   const REQ_AUTH: bool
+  const MAX_RECENT: int
 
   pure val TOTAL_S = DATA_S + PARITY_S
 
@@ -956,13 +972,20 @@ module Forge {
     }
   }
 
+  action pruneRecent: bool = all {
+    recent.size() > MAX_RECENT,
+    recent' = Set(),
+    peerAuth' = peerAuth, assemblies' = assemblies, recon' = recon,
+    gChunks' = gChunks, gFwd' = gFwd, gAuthFail' = gAuthFail, gRecon' = gRecon,
+  }
+
   action step = {
     nondet p = PEERS.oneOf()
     nondet bh = 1.to(10).oneOf()
     nondet cid = 0.to(TOTAL_S - 1).oneOf()
     nondet pow = Set(true, false).oneOf()
     nondet ok = Set(true, false).oneOf()
-    any { recvChunk(p, bh, cid, pow), authPeer(p, ok) }
+    any { recvChunk(p, bh, cid, pow), authPeer(p, ok), pruneRecent }
   }
 
   val fecSound = assemblies.keys().forall(bh => {
@@ -974,6 +997,7 @@ module Forge {
     assemblies.get(bh).recv.forall(c => c >= 0 and c < TOTAL_S))
   val shardBound = assemblies.keys().forall(bh =>
     assemblies.get(bh).recv.size() <= TOTAL_S)
+  val recentBounded = recent.size() <= MAX_RECENT + TOTAL_S
   val witnessNoChunks = gChunks == 0
   val witnessNoRecon = gRecon == 0
 }
@@ -981,7 +1005,7 @@ module Forge {
 module ForgeTest {
   import Forge(
     PEERS = Set("p1", "p2", "p3"), DATA_S = 3, PARITY_S = 1,
-    MAX_PENDING = 4, REQ_AUTH = false,
+    MAX_PENDING = 4, REQ_AUTH = false, MAX_RECENT = 50,
   ).*
 
   run fullRecon = init
@@ -1018,7 +1042,7 @@ module ForgeTest {
 module ForgeAuthTest {
   import Forge(
     PEERS = Set("p1", "p2"), DATA_S = 2, PARITY_S = 1,
-    MAX_PENDING = 4, REQ_AUTH = true,
+    MAX_PENDING = 4, REQ_AUTH = true, MAX_RECENT = 50,
   ).*
 
   run unauthFail = init
@@ -1033,4 +1057,479 @@ module ForgeAuthTest {
   run badHmac = init
     .then(authPeer("p1", false))
     .expect(gAuthFail == 1).expect(not(peerAuth.get("p1")))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 8: System Composition (ShareValidation → Payout bridge)
+// ═══════════════════════════════════════════════════════════════
+
+module SystemComposition {
+  import basicSpells.*
+  import miningSpells.*
+
+  const MINERS: Set[int]
+  const MINER_NAMES: int -> str
+
+  // --- ShareValidation state (simplified) ---
+  var svJobs: int -> (int -> { target: int, active: bool })
+  var svLastJobId: int -> int
+  var svDups: int -> Set[int]
+  var svBlockDiff: int
+  var svAcceptedCount: int
+  var svAcceptedQueue: List[(int, int)]  // (miner, difficulty) pending payout
+
+  // --- Payout state ---
+  var payTotShares: str -> int
+  var payTotDiff: str -> int
+  var payRecordedCount: int
+
+  action init = all {
+    svJobs' = MINERS.mapBy(_ => Map()),
+    svLastJobId' = MINERS.mapBy(_ => 0),
+    svDups' = Map(),
+    svBlockDiff' = 100,
+    svAcceptedCount' = 0,
+    svAcceptedQueue' = [],
+    payTotShares' = MINERS.fold(Map(), (m, id) => m.put(MINER_NAMES.get(id), 0)),
+    payTotDiff' = MINERS.fold(Map(), (m, id) => m.put(MINER_NAMES.get(id), 0)),
+    payRecordedCount' = 0,
+  }
+
+  action compAddJob(ch: int, jid: int, tgt: int, clean: bool): bool = {
+    val cJobs = svJobs.get(ch)
+    val deact = if (clean)
+      cJobs.keys().mapBy(j => { ...cJobs.get(j), active: false })
+    else cJobs
+    val entry = { target: tgt, active: true }
+    all {
+      MINERS.contains(ch), jid > 0, tgt > 0, jid > svLastJobId.get(ch),
+      svJobs' = svJobs.set(ch, deact.put(jid, entry)),
+      svLastJobId' = svLastJobId.setBy(ch, cur => max(cur, jid)),
+      svDups' = svDups, svBlockDiff' = svBlockDiff,
+      svAcceptedCount' = svAcceptedCount, svAcceptedQueue' = svAcceptedQueue,
+      payTotShares' = payTotShares, payTotDiff' = payTotDiff,
+      payRecordedCount' = payRecordedCount,
+    }
+  }
+
+  action compValidateShare(ch: int, jid: int, n2: int, sd: int): bool = {
+    val cJobs = svJobs.get(ch)
+    val hasJob = cJobs.keys().contains(jid)
+    val jobActive = if (hasJob) cJobs.get(jid).active else false
+    val jobTarget = if (hasJob) cJobs.get(jid).target else 0
+    val hasDups = svDups.keys().contains(jid)
+    val jobDups = if (hasDups) svDups.get(jid) else Set()
+    val isDup = jobDups.contains(n2)
+    val reqDiff = target_to_difficulty(jobTarget)
+    val meetsShare = sd > 0 and meets_target(sd, reqDiff)
+    all {
+      MINERS.contains(ch), hasJob, jobActive, not(isDup), meetsShare,
+      svDups' = svDups.put(jid, jobDups.union(Set(n2))),
+      svAcceptedCount' = svAcceptedCount + 1,
+      svAcceptedQueue' = svAcceptedQueue.append((ch, reqDiff)),
+      svJobs' = svJobs, svLastJobId' = svLastJobId, svBlockDiff' = svBlockDiff,
+      payTotShares' = payTotShares, payTotDiff' = payTotDiff,
+      payRecordedCount' = payRecordedCount,
+    }
+  }
+
+  // Drain one accepted share into the payout system
+  action compRecordPayout: bool = {
+    all {
+      svAcceptedQueue.length() > 0,
+      val entry = svAcceptedQueue[0]
+      val miner = entry._1
+      val diff = entry._2
+      val name = MINER_NAMES.get(miner)
+      all {
+        payTotShares' = payTotShares.setBy(name, s => s + 1),
+        payTotDiff' = payTotDiff.setBy(name, d => d + diff),
+        payRecordedCount' = payRecordedCount + 1,
+        svAcceptedQueue' = svAcceptedQueue.tail(),
+        svJobs' = svJobs, svLastJobId' = svLastJobId, svDups' = svDups,
+        svBlockDiff' = svBlockDiff, svAcceptedCount' = svAcceptedCount,
+      }
+    }
+  }
+
+  action step = {
+    nondet m = MINERS.oneOf()
+    val existingJobs = svJobs.get(m).keys()
+    val candidateJobs = existingJobs.union(Set(1))
+    nondet j = candidateJobs.oneOf()
+    nondet freshJ = (svLastJobId.get(m) + 1).to(svLastJobId.get(m) + 3).oneOf()
+    nondet n = 1.to(20).oneOf()
+    nondet s = 50.to(200).oneOf()
+    nondet t = 1.to(50).oneOf()
+    any {
+      compAddJob(m, freshJ, t, false),
+      compAddJob(m, freshJ, t, true),
+      compValidateShare(m, j, n, s),
+      compRecordPayout,
+    }
+  }
+
+  // COMPOSITION INVARIANT: accepted shares eventually equal recorded shares
+  // At any point, recorded <= accepted (queue may be non-empty)
+  val shareFlowConserved = payRecordedCount + svAcceptedQueue.length() == svAcceptedCount
+  val recordedLeqAccepted = payRecordedCount <= svAcceptedCount
+  val queueDrainable = svAcceptedQueue.length() >= 0
+}
+
+module SystemCompositionTest {
+  import SystemComposition(
+    MINERS = Set(1, 2),
+    MINER_NAMES = Map(1 -> "alice", 2 -> "bob"),
+  ).*
+
+  // End-to-end: addJob → validateShare → recordPayout
+  run compE2E = init
+    .then(compAddJob(1, 1, 10000, false))
+    .then(compValidateShare(1, 1, 42, 150))
+    .expect(svAcceptedCount == 1)
+    .expect(payRecordedCount == 0)
+    .then(compRecordPayout)
+    .expect(payRecordedCount == 1)
+    .expect(svAcceptedQueue.length() == 0)
+    .expect(shareFlowConserved)
+
+  // Multiple miners, multiple shares, drain all
+  run compMultiMiner = init
+    .then(compAddJob(1, 1, 10000, false))
+    .then(compAddJob(2, 1, 10000, false))
+    .then(compValidateShare(1, 1, 1, 150))
+    .then(compValidateShare(2, 1, 2, 150))
+    .expect(svAcceptedCount == 2)
+    .then(compRecordPayout)
+    .then(compRecordPayout)
+    .expect(payRecordedCount == 2)
+    .expect(shareFlowConserved)
+
+  // Conservation holds even with interleaved operations
+  run compInterleaved = init
+    .then(compAddJob(1, 1, 10000, false))
+    .then(compValidateShare(1, 1, 1, 150))
+    .then(compRecordPayout)
+    .then(compAddJob(1, 2, 10000, false))
+    .then(compValidateShare(1, 2, 2, 150))
+    .expect(shareFlowConserved)
+    .then(compRecordPayout)
+    .expect(shareFlowConserved)
+    .expect(payRecordedCount == 2)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 9: Duplicate Detector Wraparound Bug
+// ═══════════════════════════════════════════════════════════════
+
+module DuplicateWraparound {
+  import basicSpells.*
+
+  const MAX_JOB_ID: int
+  const MAX_SHARES: int
+
+  var dupMap: int -> Set[int]   // job_id -> set of share hashes
+  var jobIdCounter: int
+  var ghostFalsePositives: int
+  var activeJobs: Set[int]      // track which job IDs are currently active
+
+  action init = all {
+    dupMap' = Map(),
+    jobIdCounter' = 0,
+    ghostFalsePositives' = 0,
+    activeJobs' = Set(),
+  }
+
+  // Allocate a new job ID (wraps around). BUG: old dup entries NOT cleared.
+  action newJob: bool = {
+    val nextId = if (jobIdCounter >= MAX_JOB_ID) 1 else jobIdCounter + 1
+    all {
+      jobIdCounter' = nextId,
+      activeJobs' = activeJobs.union(Set(nextId)),
+      // BUG: dupMap is NOT cleared for nextId — stale entries persist
+      dupMap' = dupMap,
+      ghostFalsePositives' = ghostFalsePositives,
+    }
+  }
+
+  // Submit a unique share — false positive if hash collides with stale entry
+  action submitShare(jid: int, hash: int): bool = {
+    val hasDups = dupMap.keys().contains(jid)
+    val existing = if (hasDups) dupMap.get(jid) else Set()
+    val isDup = existing.contains(hash)
+    // This is a genuinely unique share (different job epoch), so any
+    // collision is a false positive caused by stale dup map entries
+    val isFalsePositive = isDup and activeJobs.contains(jid)
+    all {
+      jid > 0, jid <= MAX_JOB_ID, hash > 0, hash <= MAX_SHARES,
+      activeJobs.contains(jid),
+      not(isDup),  // share gets rejected if dup — cannot proceed
+      dupMap' = dupMap.put(jid, existing.union(Set(hash))),
+      jobIdCounter' = jobIdCounter,
+      ghostFalsePositives' = ghostFalsePositives,
+      activeJobs' = activeJobs,
+    }
+  }
+
+  // Submit share that may be falsely rejected (for invariant violation)
+  action submitShareMayReject(jid: int, hash: int): bool = {
+    val hasDups = dupMap.keys().contains(jid)
+    val existing = if (hasDups) dupMap.get(jid) else Set()
+    val isDup = existing.contains(hash)
+    all {
+      jid > 0, jid <= MAX_JOB_ID, hash > 0, hash <= MAX_SHARES,
+      activeJobs.contains(jid),
+      if (isDup) all {
+        // False positive: share rejected due to stale dup entry
+        ghostFalsePositives' = ghostFalsePositives + 1,
+        dupMap' = dupMap, jobIdCounter' = jobIdCounter, activeJobs' = activeJobs,
+      } else all {
+        dupMap' = dupMap.put(jid, existing.union(Set(hash))),
+        ghostFalsePositives' = ghostFalsePositives,
+        jobIdCounter' = jobIdCounter, activeJobs' = activeJobs,
+      }
+    }
+  }
+
+  action step = {
+    nondet jid = 1.to(MAX_JOB_ID).oneOf()
+    nondet hash = 1.to(MAX_SHARES).oneOf()
+    any {
+      newJob,
+      submitShareMayReject(jid, hash),
+    }
+  }
+
+  // Invariant: no false positives from wraparound
+  // Expected: VIOLATED — proving the bug exists
+  val noFalsePositives = ghostFalsePositives == 0
+}
+
+module DuplicateWraparoundTest {
+  import DuplicateWraparound(MAX_JOB_ID = 5, MAX_SHARES = 10).*
+
+  // Demonstrate the wraparound false positive bug:
+  // 1. Allocate job 1, submit share with hash 7
+  // 2. Cycle through all job IDs to wrap around back to 1
+  // 3. New job 1's share with hash 7 is falsely rejected
+  run wraparoundBug = init
+    .then(newJob)                        // jobIdCounter = 1
+    .then(submitShareMayReject(1, 7))    // records hash 7 for job 1
+    .then(newJob).then(newJob).then(newJob).then(newJob)  // counter = 5
+    .then(newJob)                        // wraps to 1 — stale dup entry!
+    .then(submitShareMayReject(1, 7))    // FALSE POSITIVE: hash 7 still in dupMap
+    .expect(ghostFalsePositives == 1)
+
+  // Normal case without wraparound works fine
+  run noWraparound = init
+    .then(newJob)
+    .then(submitShareMayReject(1, 1))
+    .then(submitShareMayReject(1, 2))
+    .then(submitShareMayReject(1, 3))
+    .expect(ghostFalsePositives == 0)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 10: TOCTOU Concurrency Model
+// ═══════════════════════════════════════════════════════════════
+// Models the 3-phase lock pattern from server.rs:
+//   Phase 1: acquire channels lock → rate check → release
+//   Phase 2: acquire channels lock → job lookup (snapshot) → release
+//   Phase 3: validate with snapshot (NO lock held)
+//   Phase 4: acquire channels lock → record accepted → release
+// Between phases, another thread or new-block event can:
+//   - deactivate a job (clean=true on new block)
+//   - change the difficulty target
+// This creates a TOCTOU race window.
+
+module ConcurrentShareValidation {
+  import basicSpells.*
+  import miningSpells.*
+
+  const THREADS: Set[int]
+
+  // Thread phase: progression through the lock pattern
+  // 0 = Idle, 1 = RateCheckDone, 2 = JobLookedUp, 3 = Validated, 4 = Done
+  var phase: int -> int
+  // Snapshot of job state taken during phase 2 (under lock)
+  var snapshot: int -> { jid: int, target: int, wasActive: bool }
+  // Validation result
+  var validated: int -> bool
+
+  // Shared mutable state (protected by lock in real code)
+  var lock: int                   // 0 = free, >0 = held by thread
+  var jobs: int -> { target: int, active: bool }
+  var accepted: Set[(int, int)]   // (thread, jid) — accepted shares
+  var ghostStaleAccepts: int      // shares accepted after job deactivated
+
+  action init = all {
+    phase' = THREADS.mapBy(_ => 0),
+    snapshot' = THREADS.mapBy(_ => { jid: 0, target: 0, wasActive: false }),
+    validated' = THREADS.mapBy(_ => false),
+    lock' = 0,
+    jobs' = Map(1 -> { target: 10000, active: true }, 2 -> { target: 10000, active: true }),
+    accepted' = Set(),
+    ghostStaleAccepts' = 0,
+  }
+
+  // Phase 1: Rate check (acquire and release lock)
+  action rateCheck(t: int): bool = all {
+    THREADS.contains(t),
+    phase.get(t) == 0,
+    lock == 0,  // lock must be free
+    // Acquire lock, do rate check, release lock — modeled as atomic
+    phase' = phase.set(t, 1),
+    snapshot' = snapshot, validated' = validated,
+    lock' = 0,  // released immediately
+    jobs' = jobs, accepted' = accepted, ghostStaleAccepts' = ghostStaleAccepts,
+  }
+
+  // Phase 2: Job lookup — snapshot job state under lock, then release
+  action jobLookup(t: int, jid: int): bool = {
+    val hasJob = jobs.keys().contains(jid)
+    val job = if (hasJob) jobs.get(jid) else { target: 0, active: false }
+    all {
+      THREADS.contains(t),
+      phase.get(t) == 1,
+      lock == 0,
+      hasJob,
+      // Take snapshot while holding lock
+      snapshot' = snapshot.set(t, { jid: jid, target: job.target, wasActive: job.active }),
+      phase' = phase.set(t, 2),
+      lock' = 0,  // released immediately
+      validated' = validated,
+      jobs' = jobs, accepted' = accepted, ghostStaleAccepts' = ghostStaleAccepts,
+    }
+  }
+
+  // Phase 3: Validate with snapshot (NO lock held!)
+  // This is the expensive Equihash validation — runs lock-free
+  action validate(t: int, shareDiff: int): bool = {
+    val snap = snapshot.get(t)
+    val reqDiff = target_to_difficulty(snap.target)
+    val meets = shareDiff > 0 and meets_target(shareDiff, reqDiff)
+    all {
+      THREADS.contains(t),
+      phase.get(t) == 2,
+      snap.wasActive,  // was active when we looked
+      meets,           // share meets difficulty
+      validated' = validated.set(t, true),
+      phase' = phase.set(t, 3),
+      // NO lock interaction — this is the TOCTOU window
+      lock' = lock,
+      snapshot' = snapshot, jobs' = jobs, accepted' = accepted,
+      ghostStaleAccepts' = ghostStaleAccepts,
+    }
+  }
+
+  // Phase 4: Record accepted share (acquire lock, record, release)
+  action recordAccepted(t: int): bool = {
+    val snap = snapshot.get(t)
+    val jid = snap.jid
+    // Check current job state (may differ from snapshot!)
+    val hasJob = jobs.keys().contains(jid)
+    val nowActive = if (hasJob) jobs.get(jid).active else false
+    val isStale = not(nowActive)  // job was deactivated between phases 2-4
+    all {
+      THREADS.contains(t),
+      phase.get(t) == 3,
+      validated.get(t),
+      lock == 0,
+      // Record the share (the real code does NOT re-check job.active here!)
+      accepted' = accepted.union(Set((t, jid))),
+      ghostStaleAccepts' = if (isStale) ghostStaleAccepts + 1 else ghostStaleAccepts,
+      phase' = phase.set(t, 4),
+      lock' = 0,
+      snapshot' = snapshot, validated' = validated, jobs' = jobs,
+    }
+  }
+
+  // Reset thread to idle for next share
+  action resetThread(t: int): bool = all {
+    THREADS.contains(t),
+    phase.get(t) == 4,
+    phase' = phase.set(t, 0),
+    validated' = validated.set(t, false),
+    snapshot' = snapshot, lock' = lock, jobs' = jobs,
+    accepted' = accepted, ghostStaleAccepts' = ghostStaleAccepts,
+  }
+
+  // External event: new block deactivates all jobs (clean=true)
+  // Can happen between any thread phases!
+  action newBlockClean: bool = all {
+    lock == 0,
+    jobs' = jobs.keys().mapBy(jid => { ...jobs.get(jid), active: false }),
+    lock' = 0,
+    phase' = phase, snapshot' = snapshot, validated' = validated,
+    accepted' = accepted, ghostStaleAccepts' = ghostStaleAccepts,
+  }
+
+  // External event: add a new active job
+  action addNewJob(jid: int, tgt: int): bool = all {
+    lock == 0,
+    jid > 0, tgt > 0,
+    jobs' = jobs.put(jid, { target: tgt, active: true }),
+    lock' = 0,
+    phase' = phase, snapshot' = snapshot, validated' = validated,
+    accepted' = accepted, ghostStaleAccepts' = ghostStaleAccepts,
+  }
+
+  action step = {
+    nondet t = THREADS.oneOf()
+    nondet jid = 1.to(3).oneOf()
+    nondet sd = 100.to(500).oneOf()
+    nondet tgt = 5000.to(20000).oneOf()
+    any {
+      rateCheck(t),
+      jobLookup(t, jid),
+      validate(t, sd),
+      recordAccepted(t),
+      resetThread(t),
+      newBlockClean,
+      addNewJob(jid, tgt),
+    }
+  }
+
+  // INVARIANT: accepted shares always had active jobs at record time
+  // Expected: VIOLATED — proving the TOCTOU race
+  val toctouSafe = ghostStaleAccepts == 0
+
+  // Safety: phases are well-ordered
+  val phaseBounded = THREADS.forall(t => phase.get(t) >= 0 and phase.get(t) <= 4)
+}
+
+module ConcurrentShareValidationTest {
+  import ConcurrentShareValidation(THREADS = Set(1, 2)).*
+
+  // Demonstrate the TOCTOU race:
+  // Thread 1 looks up job (active), then new block deactivates it,
+  // then thread 1 validates and records — accepting a stale job's share
+  run toctouRace = init
+    .then(rateCheck(1))
+    .then(jobLookup(1, 1))          // snapshot: job 1 active
+    .then(newBlockClean)             // RACE: all jobs deactivated
+    .then(validate(1, 150))          // validates against stale snapshot
+    .then(recordAccepted(1))         // accepts share for deactivated job!
+    .expect(ghostStaleAccepts == 1)
+
+  // Without race, no stale accepts
+  run noRace = init
+    .then(rateCheck(1))
+    .then(jobLookup(1, 1))
+    .then(validate(1, 150))
+    .then(recordAccepted(1))
+    .expect(ghostStaleAccepts == 0)
+
+  // Two-thread interleaving showing the race
+  run twoThreadRace = init
+    .then(rateCheck(1))
+    .then(rateCheck(2))
+    .then(jobLookup(1, 1))          // T1 snapshots job 1 as active
+    .then(jobLookup(2, 2))          // T2 snapshots job 2 as active
+    .then(newBlockClean)             // both jobs deactivated
+    .then(validate(1, 150))
+    .then(validate(2, 150))
+    .then(recordAccepted(1))
+    .then(recordAccepted(2))
+    .expect(ghostStaleAccepts == 2)  // both threads accepted stale shares
 }

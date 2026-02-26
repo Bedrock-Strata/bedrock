@@ -42,10 +42,10 @@ zcash-pool-server (main orchestrator)
 ├── zcash-equihash-validator    # Share validation + vardiff algorithm
 ├── zcash-pool-common           # Shared types (PayoutTracker)
 ├── zcash-jd-server             # Job Declaration Server (miner-controlled templates)
-├── zcash-stratum-noise         # Noise_NK encryption
-├── zcash-stratum-observability # Prometheus metrics, tracing
-├── fiber-zcash                  # Compact block relay
-└── fiber-sidecar                # Fiber relay sidecar binary
+├── bedrock-noise               # Noise_NK encryption
+├── bedrock-strata              # Prometheus metrics, tracing
+├── bedrock-forge               # Compact block relay
+└── forge-sidecar               # FORGE relay sidecar binary
 
 zcash-jd-client (standalone binary)
 ├── zcash-template-provider
@@ -61,7 +61,7 @@ zcash-jd-client (standalone binary)
 4. **ShareProcessor** validates solutions using **EquihashValidator**
 5. **VardiffController** adjusts per-miner difficulty targeting ~5 shares/min
 6. **PayoutTracker** records PPS contributions
-7. Found blocks announced to **FiberRelay** then submitted to Zebra
+7. Found blocks announced to **ForgeRelay** then submitted to Zebra
 
 ### Key Zcash-Specific Details
 
@@ -97,7 +97,7 @@ Pool server config fields:
 - `initial_difficulty`: Starting share difficulty
 - `target_shares_per_minute`: Vardiff target (default 5.0)
 - `jd_listen_addr`: Optional Job Declaration port (3334)
-- `fiber_relay_*`: Optional Fiber relay settings
+- `forge_relay_*`: Optional FORGE relay settings
 - `noise_*`: Optional Noise encryption keypair
 
 ## External Dependencies

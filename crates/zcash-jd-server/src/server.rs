@@ -28,7 +28,7 @@ use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, error, info, warn};
 use zcash_mining_protocol::codec::MessageFrame;
 use zcash_pool_common::PayoutTracker;
-use zcash_stratum_noise::NoiseStream;
+use bedrock_noise::NoiseStream;
 
 /// JD Server embedded in pool
 ///

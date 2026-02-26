@@ -16,8 +16,8 @@ use crate::channel::Channel;
 use crate::config::PoolConfig;
 use crate::duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 use crate::error::{PoolError, Result};
-#[cfg(feature = "fiber")]
-use crate::fiber::FiberRelay;
+#[cfg(feature = "forge")]
+use crate::forge::ForgeRelay;
 use crate::job::JobDistributor;
 use crate::payout::{MinerId, PayoutTracker};
 use crate::security::{ConnectionTracker, SequenceCheckResult, SequenceValidator, TimingJitter};
@@ -34,8 +34,8 @@ use tracing::{debug, error, info, warn};
 use zcash_equihash_validator::VardiffConfig;
 use zcash_jd_server::{handle_jd_client_with_transport, JdServer, JdServerConfig, JdTransport};
 use zcash_mining_protocol::messages::{NewEquihashJob, ShareResult};
-use zcash_stratum_noise::{Keypair, NoiseResponder};
-use zcash_stratum_observability::{init_logging, start_metrics_server, LogFormat, PoolMetrics};
+use bedrock_noise::{Keypair, NoiseResponder};
+use bedrock_strata::{init_logging, start_metrics_server, LogFormat, PoolMetrics};
 use zcash_template_provider::types::BlockTemplate;
 use zcash_template_provider::{TemplateProvider, TemplateProviderConfig};
 use zcash_mining_protocol::messages::SubmitEquihashShare;
@@ -73,9 +73,9 @@ pub struct PoolServer {
     noise_responder: Option<Arc<NoiseResponder>>,
     /// Pool metrics
     metrics: Arc<PoolMetrics>,
-    /// Fiber relay for compact block propagation (optional, requires "fiber" feature)
-    #[cfg(feature = "fiber")]
-    fiber_relay: Option<Arc<FiberRelay>>,
+    /// Forge relay for compact block propagation (optional, requires "forge" feature)
+    #[cfg(feature = "forge")]
+    forge_relay: Option<Arc<ForgeRelay>>,
     /// Sequence validator for replay protection
     sequence_validator: Arc<SequenceValidator>,
     /// Connection tracker for attack detection
@@ -105,26 +105,26 @@ impl PoolServer {
         // Create metrics
         let metrics = Arc::new(PoolMetrics::new());
 
-        // Create fiber relay if enabled (requires "fiber" feature)
-        #[cfg(feature = "fiber")]
-        let fiber_relay = if config.fiber_relay_enabled {
-            match FiberRelay::new(&config) {
+        // Create forge relay if enabled (requires "forge" feature)
+        #[cfg(feature = "forge")]
+        let forge_relay = if config.forge_relay_enabled {
+            match ForgeRelay::new(&config) {
                 Ok(relay) => {
-                    info!("Fiber relay initialized");
+                    info!("Forge relay initialized");
                     Some(Arc::new(relay))
                 }
                 Err(e) => {
-                    warn!("Failed to create fiber relay: {}. Continuing without relay.", e);
+                    warn!("Failed to create forge relay: {}. Continuing without relay.", e);
                     None
                 }
             }
         } else {
-            info!("Fiber relay disabled");
+            info!("Forge relay disabled");
             None
         };
-        #[cfg(not(feature = "fiber"))]
-        if config.fiber_relay_enabled {
-            warn!("Fiber relay requested but 'fiber' feature is not enabled. Ignoring.");
+        #[cfg(not(feature = "forge"))]
+        if config.forge_relay_enabled {
+            warn!("Forge relay requested but 'forge' feature is not enabled. Ignoring.");
         }
 
         // Create template provider
@@ -222,8 +222,8 @@ impl PoolServer {
             jd_listen_addr,
             noise_responder,
             metrics,
-            #[cfg(feature = "fiber")]
-            fiber_relay,
+            #[cfg(feature = "forge")]
+            forge_relay,
             sequence_validator,
             connection_tracker,
             timing_jitter,
@@ -266,19 +266,19 @@ impl PoolServer {
             }
         });
 
-        // Initialize and start fiber relay if enabled
-        #[cfg(feature = "fiber")]
-        if let Some(ref fiber) = self.fiber_relay {
-            if let Err(e) = fiber.init().await {
-                warn!("Failed to initialize fiber relay: {}. Continuing without relay.", e);
+        // Initialize and start forge relay if enabled
+        #[cfg(feature = "forge")]
+        if let Some(ref forge) = self.forge_relay {
+            if let Err(e) = forge.init().await {
+                warn!("Failed to initialize forge relay: {}. Continuing without relay.", e);
             } else {
-                let fiber = Arc::clone(fiber);
+                let forge = Arc::clone(forge);
                 tokio::spawn(async move {
-                    if let Err(e) = fiber.start().await {
-                        warn!("Fiber relay start error: {}", e);
+                    if let Err(e) = forge.start().await {
+                        warn!("Forge relay start error: {}", e);
                     }
                 });
-                info!("Fiber relay started");
+                info!("Forge relay started");
             }
         }
 
@@ -668,14 +668,14 @@ impl PoolServer {
             .set_current_prev_hash(template.header.prev_hash.0)
             .await;
 
-        // Announce to fiber relay network (non-blocking)
-        #[cfg(feature = "fiber")]
-        if let Some(ref fiber) = self.fiber_relay {
-            let fiber = Arc::clone(fiber);
+        // Announce to forge relay network (non-blocking)
+        #[cfg(feature = "forge")]
+        if let Some(ref forge) = self.forge_relay {
+            let forge = Arc::clone(forge);
             let template_clone = template.clone();
             tokio::spawn(async move {
-                if let Err(e) = fiber.announce_template(&template_clone).await {
-                    warn!("Failed to announce template to fiber relay: {}", e);
+                if let Err(e) = forge.announce_template(&template_clone).await {
+                    warn!("Failed to announce template to forge relay: {}", e);
                 }
             });
         }
@@ -900,14 +900,14 @@ impl PoolServer {
                             self.job_distributor.read().await.current_height()
                         );
 
-                        // Announce to fiber relay BEFORE submitting to Zebra
+                        // Announce to forge relay BEFORE submitting to Zebra
                         // This gives the relay network a head start
-                        #[cfg(feature = "fiber")]
-                        if let Some(ref fiber) = self.fiber_relay {
+                        #[cfg(feature = "forge")]
+                        if let Some(ref forge) = self.forge_relay {
                             let header = job.build_header(&job.build_nonce(&share.nonce_2).unwrap_or_default());
 
                             // Clone all needed data atomically in one lock acquisition
-                            let fiber_data = {
+                            let forge_data = {
                                 let distributor = self.job_distributor.read().await;
                                 distributor.current_template().map(|t| {
                                     let tx_hashes: Vec<[u8; 32]> = t.transactions.iter()
@@ -928,11 +928,11 @@ impl PoolServer {
                                 })
                             };
 
-                            if let Some((coinbase, tx_hashes)) = fiber_data {
-                                let fiber = Arc::clone(fiber);
+                            if let Some((coinbase, tx_hashes)) = forge_data {
+                                let forge = Arc::clone(forge);
                                 tokio::spawn(async move {
-                                    if let Err(e) = fiber.announce_block(&header, &coinbase, &tx_hashes).await {
-                                        warn!("Failed to announce block to fiber relay: {}", e);
+                                    if let Err(e) = forge.announce_block(&header, &coinbase, &tx_hashes).await {
+                                        warn!("Failed to announce block to forge relay: {}", e);
                                     }
                                 });
                             }

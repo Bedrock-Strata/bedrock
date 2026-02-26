@@ -212,6 +212,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bedrock-forge"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "criterion",
+ "equihash",
+ "hex",
+ "hmac",
+ "proptest",
+ "rand 0.8.5",
+ "reed-solomon-erasure",
+ "sha2",
+ "siphasher",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "bedrock-noise"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rand 0.8.5",
+ "snow",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "bedrock-strata"
+version = "0.1.0"
+dependencies = [
+ "hyper 0.14.32",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "prometheus",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -691,45 +742,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
-name = "fiber-sidecar"
-version = "0.1.0"
-dependencies = [
- "clap",
- "fiber-zcash",
- "hex",
- "jsonrpsee",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fiber-zcash"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "criterion",
- "equihash",
- "hex",
- "hmac",
- "proptest",
- "rand 0.8.5",
- "reed-solomon-erasure",
- "sha2",
- "siphasher",
- "subtle",
- "thiserror",
- "tokio",
- "tokio-test",
- "tracing",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -755,6 +767,24 @@ name = "foreign-types-shared"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+
+[[package]]
+name = "forge-sidecar"
+version = "0.1.0"
+dependencies = [
+ "bedrock-forge",
+ "clap",
+ "hex",
+ "jsonrpsee",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "form_urlencoded"
@@ -3620,6 +3650,7 @@ dependencies = [
 name = "zcash-jd-client"
 version = "0.1.0"
 dependencies = [
+ "bedrock-noise",
  "byteorder",
  "clap",
  "hex",
@@ -3635,7 +3666,6 @@ dependencies = [
  "zcash-jd-server",
  "zcash-mining-protocol",
  "zcash-pool-common",
- "zcash-stratum-noise",
  "zcash-template-provider",
 ]
 
@@ -3643,6 +3673,7 @@ dependencies = [
 name = "zcash-jd-server"
 version = "0.1.0"
 dependencies = [
+ "bedrock-noise",
  "byteorder",
  "hex",
  "rand 0.8.5",
@@ -3653,7 +3684,6 @@ dependencies = [
  "tracing",
  "zcash-mining-protocol",
  "zcash-pool-common",
- "zcash-stratum-noise",
 ]
 
 [[package]]
@@ -3674,9 +3704,11 @@ version = "0.1.0"
 name = "zcash-pool-server"
 version = "0.1.0"
 dependencies = [
+ "bedrock-forge",
+ "bedrock-noise",
+ "bedrock-strata",
  "blake2b_simd",
  "byteorder",
- "fiber-zcash",
  "hex",
  "rand 0.8.5",
  "rustc-hash",
@@ -3690,39 +3722,7 @@ dependencies = [
  "zcash-jd-server",
  "zcash-mining-protocol",
  "zcash-pool-common",
- "zcash-stratum-noise",
- "zcash-stratum-observability",
  "zcash-template-provider",
-]
-
-[[package]]
-name = "zcash-stratum-noise"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rand 0.8.5",
- "snow",
- "thiserror",
- "tokio",
- "tracing",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "zcash-stratum-observability"
-version = "0.1.0"
-dependencies = [
- "hyper 0.14.32",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "prometheus",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]

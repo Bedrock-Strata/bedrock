@@ -880,10 +880,10 @@ module PayoutTest {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MODULE 7: Fiber Relay
+// MODULE 7: Forge Relay
 // ═══════════════════════════════════════════════════════════════
 
-module Fiber {
+module Forge {
   import basicSpells.*
 
   const PEERS: Set[str]
@@ -978,8 +978,8 @@ module Fiber {
   val witnessNoRecon = gRecon == 0
 }
 
-module FiberTest {
-  import Fiber(
+module ForgeTest {
+  import Forge(
     PEERS = Set("p1", "p2", "p3"), DATA_S = 3, PARITY_S = 1,
     MAX_PENDING = 4, REQ_AUTH = false,
   ).*
@@ -1015,8 +1015,8 @@ module FiberTest {
     .expect(recon.contains(2))
 }
 
-module FiberAuthTest {
-  import Fiber(
+module ForgeAuthTest {
+  import Forge(
     PEERS = Set("p1", "p2"), DATA_S = 2, PARITY_S = 1,
     MAX_PENDING = 4, REQ_AUTH = true,
   ).*

@@ -18,8 +18,8 @@ pub mod channel;
 pub mod config;
 pub mod duplicate;
 pub mod error;
-#[cfg(feature = "fiber")]
-pub mod fiber;
+#[cfg(feature = "forge")]
+pub mod forge;
 pub mod job;
 pub mod payout;
 pub mod ratelimit;
@@ -33,8 +33,8 @@ pub use channel::{Channel, ChannelJob};
 pub use config::PoolConfig;
 pub use duplicate::{DuplicateDetector, InMemoryDuplicateDetector};
 pub use error::PoolError;
-#[cfg(feature = "fiber")]
-pub use fiber::FiberRelay;
+#[cfg(feature = "forge")]
+pub use forge::ForgeRelay;
 pub use job::JobDistributor;
 pub use payout::{MinerId, MinerStats, PayoutTracker};
 pub use ratelimit::{RateLimitResult, RateLimiter};

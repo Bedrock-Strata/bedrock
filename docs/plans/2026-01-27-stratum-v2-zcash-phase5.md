@@ -4,7 +4,7 @@
 
 **Goal:** Add Noise Protocol encryption and full observability (metrics, structured logging, tracing) to prepare the Stratum V2 Zcash implementation for production deployment.
 
-**Architecture:** New `zcash-stratum-noise` crate provides Noise NK handshake and encrypted transport wrappers. Pool Server, JD Server, and JD Client gain configurable encryption. Observability via Prometheus metrics endpoint, JSON structured logging, and OpenTelemetry tracing spans.
+**Architecture:** New `bedrock-noise` crate provides Noise NK handshake and encrypted transport wrappers. Pool Server, JD Server, and JD Client gain configurable encryption. Observability via Prometheus metrics endpoint, JSON structured logging, and OpenTelemetry tracing spans.
 
 **Tech Stack:** Rust 1.75+, `snow` (Noise Protocol), `prometheus` (metrics), `tracing` + `tracing-subscriber` (logging/spans), `opentelemetry` + `opentelemetry-otlp` (distributed tracing)
 
@@ -25,7 +25,7 @@
 ## Crate Structure
 
 ```
-crates/zcash-stratum-noise/
+crates/bedrock-noise/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs              # Public API
@@ -41,17 +41,17 @@ crates/zcash-stratum-noise/
 ## Task 1: Initialize Noise Crate with Keypair Management
 
 **Files:**
-- Create: `crates/zcash-stratum-noise/Cargo.toml`
-- Create: `crates/zcash-stratum-noise/src/lib.rs`
-- Create: `crates/zcash-stratum-noise/src/keys.rs`
+- Create: `crates/bedrock-noise/Cargo.toml`
+- Create: `crates/bedrock-noise/src/lib.rs`
+- Create: `crates/bedrock-noise/src/keys.rs`
 
 **Step 1: Create Cargo.toml**
 
-Create `crates/zcash-stratum-noise/Cargo.toml`:
+Create `crates/bedrock-noise/Cargo.toml`:
 
 ```toml
 [package]
-name = "zcash-stratum-noise"
+name = "bedrock-noise"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -70,7 +70,7 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 
 **Step 2: Create lib.rs**
 
-Create `crates/zcash-stratum-noise/src/lib.rs`:
+Create `crates/bedrock-noise/src/lib.rs`:
 
 ```rust
 //! Noise Protocol encryption for Zcash Stratum V2
@@ -106,7 +106,7 @@ pub const NOISE_PATTERN: &str = "Noise_NK_25519_ChaChaPoly_BLAKE2s";
 
 **Step 3: Create keys.rs**
 
-Create `crates/zcash-stratum-noise/src/keys.rs`:
+Create `crates/bedrock-noise/src/keys.rs`:
 
 ```rust
 //! Keypair generation and management for Noise Protocol
@@ -288,18 +288,18 @@ mod tests {
 
 **Step 4: Verify compilation**
 
-Run: `cargo check -p zcash-stratum-noise`
+Run: `cargo check -p bedrock-noise`
 Expected: PASS
 
 **Step 5: Run tests**
 
-Run: `cargo test -p zcash-stratum-noise`
+Run: `cargo test -p bedrock-noise`
 Expected: All 5 tests pass
 
 **Step 6: Commit**
 
 ```bash
-git add crates/zcash-stratum-noise/
+git add crates/bedrock-noise/
 git commit -m "feat(noise): initialize crate with keypair management"
 ```
 
@@ -308,11 +308,11 @@ git commit -m "feat(noise): initialize crate with keypair management"
 ## Task 2: Implement Noise NK Handshake
 
 **Files:**
-- Create: `crates/zcash-stratum-noise/src/handshake.rs`
+- Create: `crates/bedrock-noise/src/handshake.rs`
 
 **Step 1: Create handshake.rs**
 
-Create `crates/zcash-stratum-noise/src/handshake.rs`:
+Create `crates/bedrock-noise/src/handshake.rs`:
 
 ```rust
 //! Noise NK handshake implementation
@@ -481,7 +481,7 @@ mod tests {
 
 **Step 2: Verify compilation**
 
-Run: `cargo check -p zcash-stratum-noise`
+Run: `cargo check -p bedrock-noise`
 Expected: PASS (will fail until transport.rs exists)
 
 **Step 3: Commit (after Task 3)**
@@ -491,11 +491,11 @@ Expected: PASS (will fail until transport.rs exists)
 ## Task 3: Implement Encrypted Transport Stream
 
 **Files:**
-- Create: `crates/zcash-stratum-noise/src/transport.rs`
+- Create: `crates/bedrock-noise/src/transport.rs`
 
 **Step 1: Create transport.rs**
 
-Create `crates/zcash-stratum-noise/src/transport.rs`:
+Create `crates/bedrock-noise/src/transport.rs`:
 
 ```rust
 //! Encrypted transport stream wrapper
@@ -682,13 +682,13 @@ mod tests {
 
 **Step 2: Verify compilation and tests**
 
-Run: `cargo test -p zcash-stratum-noise`
+Run: `cargo test -p bedrock-noise`
 Expected: All tests pass
 
 **Step 3: Commit**
 
 ```bash
-git add crates/zcash-stratum-noise/
+git add crates/bedrock-noise/
 git commit -m "feat(noise): implement NK handshake and encrypted transport"
 ```
 
@@ -697,19 +697,19 @@ git commit -m "feat(noise): implement NK handshake and encrypted transport"
 ## Task 4: Add Observability Crate
 
 **Files:**
-- Create: `crates/zcash-stratum-observability/Cargo.toml`
-- Create: `crates/zcash-stratum-observability/src/lib.rs`
-- Create: `crates/zcash-stratum-observability/src/metrics.rs`
-- Create: `crates/zcash-stratum-observability/src/logging.rs`
-- Create: `crates/zcash-stratum-observability/src/tracing_setup.rs`
+- Create: `crates/bedrock-strata/Cargo.toml`
+- Create: `crates/bedrock-strata/src/lib.rs`
+- Create: `crates/bedrock-strata/src/metrics.rs`
+- Create: `crates/bedrock-strata/src/logging.rs`
+- Create: `crates/bedrock-strata/src/tracing_setup.rs`
 
 **Step 1: Create Cargo.toml**
 
-Create `crates/zcash-stratum-observability/Cargo.toml`:
+Create `crates/bedrock-strata/Cargo.toml`:
 
 ```toml
 [package]
-name = "zcash-stratum-observability"
+name = "bedrock-strata"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -733,7 +733,7 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 
 **Step 2: Create lib.rs**
 
-Create `crates/zcash-stratum-observability/src/lib.rs`:
+Create `crates/bedrock-strata/src/lib.rs`:
 
 ```rust
 //! Observability for Zcash Stratum V2
@@ -754,7 +754,7 @@ pub use tracing_setup::init_tracing;
 
 **Step 3: Create metrics.rs**
 
-Create `crates/zcash-stratum-observability/src/metrics.rs`:
+Create `crates/bedrock-strata/src/metrics.rs`:
 
 ```rust
 //! Prometheus metrics for pool monitoring
@@ -1002,7 +1002,7 @@ mod tests {
 
 **Step 4: Create logging.rs**
 
-Create `crates/zcash-stratum-observability/src/logging.rs`:
+Create `crates/bedrock-strata/src/logging.rs`:
 
 ```rust
 //! Structured JSON logging configuration
@@ -1070,7 +1070,7 @@ mod tests {
 
 **Step 5: Create tracing_setup.rs**
 
-Create `crates/zcash-stratum-observability/src/tracing_setup.rs`:
+Create `crates/bedrock-strata/src/tracing_setup.rs`:
 
 ```rust
 //! OpenTelemetry distributed tracing setup
@@ -1171,13 +1171,13 @@ mod tests {
 
 **Step 6: Verify compilation and tests**
 
-Run: `cargo test -p zcash-stratum-observability`
+Run: `cargo test -p bedrock-strata`
 Expected: All tests pass
 
 **Step 7: Commit**
 
 ```bash
-git add crates/zcash-stratum-observability/
+git add crates/bedrock-strata/
 git commit -m "feat(observability): add metrics, logging, and tracing"
 ```
 
@@ -1195,8 +1195,8 @@ git commit -m "feat(observability): add metrics, logging, and tracing"
 Add to `crates/zcash-pool-server/Cargo.toml` dependencies:
 
 ```toml
-zcash-stratum-noise = { path = "../zcash-stratum-noise" }
-zcash-stratum-observability = { path = "../zcash-stratum-observability" }
+bedrock-noise = { path = "../bedrock-noise" }
+bedrock-strata = { path = "../bedrock-strata" }
 ```
 
 **Step 2: Update config.rs**
@@ -1204,7 +1204,7 @@ zcash-stratum-observability = { path = "../zcash-stratum-observability" }
 Add to `crates/zcash-pool-server/src/config.rs`:
 
 ```rust
-use zcash_stratum_noise::PublicKey;
+use bedrock_noise::PublicKey;
 use std::path::PathBuf;
 
 // Add to PoolConfig struct:
@@ -1241,8 +1241,8 @@ use std::path::PathBuf;
 Add to imports in `crates/zcash-pool-server/src/server.rs`:
 
 ```rust
-use zcash_stratum_noise::{Keypair, NoiseResponder, NoiseStream};
-use zcash_stratum_observability::{PoolMetrics, start_metrics_server, init_logging, LogFormat};
+use bedrock_noise::{Keypair, NoiseResponder, NoiseStream};
+use bedrock_strata::{PoolMetrics, start_metrics_server, init_logging, LogFormat};
 use std::sync::Arc;
 ```
 
@@ -1366,7 +1366,7 @@ git commit -m "feat(pool): integrate Noise encryption and metrics"
 Add to `crates/zcash-jd-server/Cargo.toml`:
 
 ```toml
-zcash-stratum-noise = { path = "../zcash-stratum-noise" }
+bedrock-noise = { path = "../bedrock-noise" }
 ```
 
 **Step 2: Update config.rs**
@@ -1404,7 +1404,7 @@ git commit -m "feat(jd-server): add Noise encryption support"
 Add to `crates/zcash-jd-client/Cargo.toml`:
 
 ```toml
-zcash-stratum-noise = { path = "../zcash-stratum-noise" }
+bedrock-noise = { path = "../bedrock-noise" }
 ```
 
 **Step 2: Update config.rs**
@@ -1461,17 +1461,17 @@ git commit -m "feat(jd-client): add Noise encryption support"
 ## Task 8: Add Integration Tests
 
 **Files:**
-- Create: `crates/zcash-stratum-noise/tests/integration_tests.rs`
+- Create: `crates/bedrock-noise/tests/integration_tests.rs`
 - Create: `tests/noise_integration.rs` (workspace level)
 
 **Step 1: Create noise crate integration tests**
 
-Create `crates/zcash-stratum-noise/tests/integration_tests.rs`:
+Create `crates/bedrock-noise/tests/integration_tests.rs`:
 
 ```rust
 //! Integration tests for Noise encryption
 
-use zcash_stratum_noise::{Keypair, NoiseInitiator, NoiseResponder};
+use bedrock_noise::{Keypair, NoiseInitiator, NoiseResponder};
 use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
@@ -1534,7 +1534,7 @@ async fn test_key_persistence() {
 **Step 2: Commit**
 
 ```bash
-git add crates/zcash-stratum-noise/tests/ tests/
+git add crates/bedrock-noise/tests/ tests/
 git commit -m "test(noise): add integration tests"
 ```
 
@@ -1543,16 +1543,16 @@ git commit -m "test(noise): add integration tests"
 ## Task 9: Documentation and Final Verification
 
 **Files:**
-- Create: `crates/zcash-stratum-noise/README.md`
-- Create: `crates/zcash-stratum-observability/README.md`
+- Create: `crates/bedrock-noise/README.md`
+- Create: `crates/bedrock-strata/README.md`
 - Update: `README.md` (workspace)
 
 **Step 1: Create Noise README**
 
-Create `crates/zcash-stratum-noise/README.md`:
+Create `crates/bedrock-noise/README.md`:
 
 ```markdown
-# zcash-stratum-noise
+# bedrock-noise
 
 Noise Protocol encryption for Zcash Stratum V2.
 
@@ -1568,7 +1568,7 @@ Implements the Noise NK handshake pattern as used by SV2:
 ### Server Side
 
 ```rust
-use zcash_stratum_noise::{Keypair, NoiseResponder};
+use bedrock_noise::{Keypair, NoiseResponder};
 
 let keypair = Keypair::generate();
 println!("Public key: {}", keypair.public);
@@ -1580,7 +1580,7 @@ let encrypted_stream = responder.accept(tcp_stream).await?;
 ### Client Side
 
 ```rust
-use zcash_stratum_noise::{NoiseInitiator, PublicKey};
+use bedrock_noise::{NoiseInitiator, PublicKey};
 
 let server_key = PublicKey::from_hex("...")?;
 let initiator = NoiseInitiator::new(server_key);
@@ -1596,10 +1596,10 @@ let encrypted_stream = initiator.connect(tcp_stream).await?;
 
 **Step 2: Create Observability README**
 
-Create `crates/zcash-stratum-observability/README.md`:
+Create `crates/bedrock-strata/README.md`:
 
 ```markdown
-# zcash-stratum-observability
+# bedrock-strata
 
 Observability stack for Zcash Stratum V2.
 
@@ -1608,7 +1608,7 @@ Observability stack for Zcash Stratum V2.
 ### Prometheus Metrics
 
 ```rust
-use zcash_stratum_observability::{PoolMetrics, start_metrics_server};
+use bedrock_strata::{PoolMetrics, start_metrics_server};
 
 let metrics = Arc::new(PoolMetrics::new());
 metrics.connections_total.inc();
@@ -1620,7 +1620,7 @@ tokio::spawn(start_metrics_server(addr, metrics));
 ### Structured Logging
 
 ```rust
-use zcash_stratum_observability::{init_logging, LogFormat};
+use bedrock_strata::{init_logging, LogFormat};
 
 // Development
 init_logging(LogFormat::Pretty, "info");
@@ -1632,7 +1632,7 @@ init_logging(LogFormat::Json, "info");
 ### Distributed Tracing
 
 ```rust
-use zcash_stratum_observability::{init_tracing, TracingConfig};
+use bedrock_strata::{init_tracing, TracingConfig};
 
 let config = TracingConfig {
     service_name: "zcash-pool".into(),
@@ -1666,7 +1666,7 @@ Expected: All tests pass
 **Step 5: Commit**
 
 ```bash
-git add README.md crates/zcash-stratum-noise/README.md crates/zcash-stratum-observability/README.md
+git add README.md crates/bedrock-noise/README.md crates/bedrock-strata/README.md
 git commit -m "docs: add Phase 5 documentation"
 ```
 
@@ -1676,12 +1676,12 @@ git commit -m "docs: add Phase 5 documentation"
 
 Phase 5 adds two new crates:
 
-1. **`zcash-stratum-noise`** - Noise NK encryption:
+1. **`bedrock-noise`** - Noise NK encryption:
    - Keypair generation and storage
    - Handshake (initiator/responder)
    - Encrypted transport stream
 
-2. **`zcash-stratum-observability`** - Production monitoring:
+2. **`bedrock-strata`** - Production monitoring:
    - Prometheus metrics endpoint
    - Structured JSON logging
    - OpenTelemetry distributed tracing

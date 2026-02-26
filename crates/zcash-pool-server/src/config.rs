@@ -64,18 +64,18 @@ pub struct PoolConfig {
     /// OTLP endpoint for distributed tracing
     pub otlp_endpoint: Option<String>,
 
-    /// Fiber relay configuration (optional - None disables relay)
-    pub fiber_relay_enabled: bool,
-    /// UDP bind address for fiber relay (default: 0.0.0.0:8336)
-    pub fiber_bind_addr: Option<SocketAddr>,
+    /// Forge relay configuration (optional - None disables relay)
+    pub forge_relay_enabled: bool,
+    /// UDP bind address for forge relay (default: 0.0.0.0:8336)
+    pub forge_bind_addr: Option<SocketAddr>,
     /// Relay peer addresses to connect to
-    pub fiber_relay_peers: Vec<SocketAddr>,
+    pub forge_relay_peers: Vec<SocketAddr>,
     /// Shared authentication key for relay network (32 bytes)
-    pub fiber_auth_key: Option<[u8; 32]>,
+    pub forge_auth_key: Option<[u8; 32]>,
     /// FEC data shards (default: 10)
-    pub fiber_data_shards: usize,
+    pub forge_data_shards: usize,
     /// FEC parity shards (default: 3)
-    pub fiber_parity_shards: usize,
+    pub forge_parity_shards: usize,
 
     // Security settings (attack mitigation)
     /// Enable sequence validation for replay attack protection
@@ -113,8 +113,8 @@ pub enum ConfigError {
     InvalidTemplatePollMs(u64),
     /// Invalid max connections (must be at least 1)
     InvalidMaxConnections(usize),
-    /// Fiber relay enabled but no auth key provided
-    FiberMissingAuthKey,
+    /// Forge relay enabled but no auth key provided
+    ForgeMissingAuthKey,
     /// Invalid FEC shard configuration
     InvalidFecConfig { data: usize, parity: usize },
     /// JD enabled but no pool payout script
@@ -138,8 +138,8 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidMaxConnections(v) => {
                 write!(f, "max_connections {} must be at least 1", v)
             }
-            ConfigError::FiberMissingAuthKey => {
-                write!(f, "fiber_relay_enabled requires fiber_auth_key")
+            ConfigError::ForgeMissingAuthKey => {
+                write!(f, "forge_relay_enabled requires forge_auth_key")
             }
             ConfigError::InvalidFecConfig { data, parity } => {
                 write!(f, "FEC config invalid: data={}, parity={} (both must be >= 1)", data, parity)
@@ -188,18 +188,18 @@ impl PoolConfig {
             return Err(ConfigError::InvalidMaxConnections(self.max_connections));
         }
 
-        // Fiber relay requires auth key
-        if self.fiber_relay_enabled && self.fiber_auth_key.is_none() {
-            return Err(ConfigError::FiberMissingAuthKey);
+        // Forge relay requires auth key
+        if self.forge_relay_enabled && self.forge_auth_key.is_none() {
+            return Err(ConfigError::ForgeMissingAuthKey);
         }
 
         // FEC shards must be valid
-        if self.fiber_relay_enabled
-            && (self.fiber_data_shards == 0 || self.fiber_parity_shards == 0)
+        if self.forge_relay_enabled
+            && (self.forge_data_shards == 0 || self.forge_parity_shards == 0)
         {
             return Err(ConfigError::InvalidFecConfig {
-                data: self.fiber_data_shards,
-                parity: self.fiber_parity_shards,
+                data: self.forge_data_shards,
+                parity: self.forge_parity_shards,
             });
         }
 
@@ -234,12 +234,12 @@ impl Default for PoolConfig {
             metrics_addr: Some(SocketAddr::from(([127, 0, 0, 1], 9090))),
             json_logging: false,
             otlp_endpoint: None,
-            fiber_relay_enabled: false,
-            fiber_bind_addr: Some(SocketAddr::from(([0, 0, 0, 0], 8336))),
-            fiber_relay_peers: Vec::new(),
-            fiber_auth_key: None,
-            fiber_data_shards: 10,
-            fiber_parity_shards: 3,
+            forge_relay_enabled: false,
+            forge_bind_addr: Some(SocketAddr::from(([0, 0, 0, 0], 8336))),
+            forge_relay_peers: Vec::new(),
+            forge_auth_key: None,
+            forge_data_shards: 10,
+            forge_parity_shards: 3,
             // Security defaults - enable protections by default
             sequence_validation_enabled: true,
             sequence_max_gap: 1000,

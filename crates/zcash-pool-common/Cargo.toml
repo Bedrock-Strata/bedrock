@@ -6,3 +6,4 @@ license.workspace = true
 description = "Common types shared between pool server components"
 
 [dependencies]
+tracing = { workspace = true }

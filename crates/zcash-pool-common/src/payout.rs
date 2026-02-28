@@ -45,7 +45,20 @@ impl PayoutTracker {
     }
 
     /// Record a share for a miner
+    ///
+    /// Validates that difficulty is finite and positive before recording.
+    /// Ignores shares with invalid difficulty (NaN, Infinity, negative, zero)
+    /// to prevent poisoning payout calculations.
     pub fn record_share(&self, miner_id: &MinerId, difficulty: f64) {
+        // Guard against NaN, Infinity, negative, and zero difficulty
+        if !difficulty.is_finite() || difficulty <= 0.0 {
+            tracing::warn!(
+                "Ignoring share with invalid difficulty {} for miner {}",
+                difficulty, miner_id
+            );
+            return;
+        }
+
         let now = Instant::now();
 
         // Set window start on first share in window
@@ -124,6 +137,29 @@ impl PayoutTracker {
             .filter(|s| s.last_share.map(|t| t > cutoff).unwrap_or(false))
             .count()
     }
+
+    /// Remove a miner from the tracker (on disconnect)
+    pub fn remove_miner(&self, miner_id: &MinerId) {
+        let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
+        miners.remove(miner_id);
+    }
+
+    /// Remove miners that haven't submitted a share within the given duration.
+    ///
+    /// Prevents unbounded growth of the miners HashMap when miners
+    /// disconnect and reconnect with new channel IDs.
+    pub fn cleanup_stale_miners(&self, max_idle: Duration) {
+        let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
+        let cutoff = Instant::now() - max_idle;
+        let before = miners.len();
+        miners.retain(|_, stats| {
+            stats.last_share.map(|t| t > cutoff).unwrap_or(false)
+        });
+        let removed = before - miners.len();
+        if removed > 0 {
+            tracing::debug!("Cleaned up {} stale miner entries", removed);
+        }
+    }
 }
 
 impl Default for PayoutTracker {
@@ -187,5 +223,49 @@ mod tests {
 
         let all = tracker.get_all_stats();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_record_share_rejects_invalid_difficulty() {
+        let tracker = PayoutTracker::default();
+        let miner = "miner1".to_string();
+
+        // Valid share first
+        tracker.record_share(&miner, 100.0);
+
+        // These should all be silently rejected
+        tracker.record_share(&miner, f64::NAN);
+        tracker.record_share(&miner, f64::INFINITY);
+        tracker.record_share(&miner, f64::NEG_INFINITY);
+        tracker.record_share(&miner, -1.0);
+        tracker.record_share(&miner, 0.0);
+
+        let stats = tracker.get_stats(&miner).unwrap();
+        assert_eq!(stats.total_shares, 1); // Only the valid share counted
+        assert_eq!(stats.total_difficulty, 100.0); // Not poisoned
+    }
+
+    #[test]
+    fn test_remove_miner() {
+        let tracker = PayoutTracker::default();
+        let miner = "miner1".to_string();
+
+        tracker.record_share(&miner, 100.0);
+        assert!(tracker.get_stats(&miner).is_some());
+
+        tracker.remove_miner(&miner);
+        assert!(tracker.get_stats(&miner).is_none());
+    }
+
+    #[test]
+    fn test_cleanup_stale_miners() {
+        let tracker = PayoutTracker::default();
+
+        tracker.record_share(&"miner1".to_string(), 100.0);
+        tracker.record_share(&"miner2".to_string(), 200.0);
+
+        // With 0 duration, all miners are "stale"
+        tracker.cleanup_stale_miners(Duration::ZERO);
+        assert_eq!(tracker.get_all_stats().len(), 0);
     }
 }

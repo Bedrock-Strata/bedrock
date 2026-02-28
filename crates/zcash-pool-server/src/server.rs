@@ -285,7 +285,7 @@ impl PoolServer {
             }
         }
 
-        // Spawn periodic stats logging
+        // Spawn periodic stats logging and stale miner cleanup
         let payout_tracker = Arc::clone(&self.payout_tracker);
         let sessions = Arc::clone(&self.sessions);
         let metrics = Arc::clone(&self.metrics);
@@ -293,6 +293,10 @@ impl PoolServer {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
+
+                // Clean up stale miner entries (idle > 30 minutes)
+                payout_tracker.cleanup_stale_miners(Duration::from_secs(1800));
+
                 let session_count = sessions.read().await.len();
                 let active_miners = payout_tracker.active_miner_count();
                 let hashrate = payout_tracker.estimate_pool_hashrate();

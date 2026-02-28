@@ -3699,6 +3699,9 @@ dependencies = [
 [[package]]
 name = "zcash-pool-common"
 version = "0.1.0"
+dependencies = [
+ "tracing",
+]
 
 [[package]]
 name = "zcash-pool-server"

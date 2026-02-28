@@ -243,6 +243,8 @@ pub struct ConnectionTracker {
     tracking_window: Duration,
     /// Maximum short-lived connections before flagging
     max_short_lived_per_window: usize,
+    /// Maximum tracked addresses to prevent unbounded memory growth
+    max_tracked_addresses: usize,
 }
 
 /// Connection history for a single address
@@ -274,6 +276,9 @@ impl Default for ConnectionTracker {
     }
 }
 
+/// Default maximum number of tracked addresses
+const DEFAULT_MAX_TRACKED_ADDRESSES: usize = 100_000;
+
 impl ConnectionTracker {
     /// Create a new connection tracker
     pub fn new(
@@ -286,6 +291,7 @@ impl ConnectionTracker {
             short_lived_threshold,
             tracking_window,
             max_short_lived_per_window,
+            max_tracked_addresses: DEFAULT_MAX_TRACKED_ADDRESSES,
         }
     }
 
@@ -296,6 +302,40 @@ impl ConnectionTracker {
             warn!("ConnectionTracker lock poisoned in on_connect, recovering");
             e.into_inner()
         });
+
+        // If at capacity and this is a new address, evict the oldest unflagged entry
+        if connections.len() >= self.max_tracked_addresses && !connections.contains_key(&addr) {
+            // Find the oldest unflagged entry to evict
+            let evict_addr = connections
+                .iter()
+                .filter(|(_, h)| !h.is_flagged)
+                .min_by_key(|(_, h)| {
+                    h.recent_durations
+                        .back()
+                        .map(|r| r.disconnected_at)
+                        .unwrap_or(now)
+                })
+                .map(|(addr, _)| *addr);
+
+            if let Some(addr_to_evict) = evict_addr {
+                connections.remove(&addr_to_evict);
+            } else {
+                // All entries are flagged; evict the oldest flagged entry
+                let evict_addr = connections
+                    .iter()
+                    .min_by_key(|(_, h)| {
+                        h.recent_durations
+                            .back()
+                            .map(|r| r.disconnected_at)
+                            .unwrap_or(now)
+                    })
+                    .map(|(addr, _)| *addr);
+                if let Some(addr_to_evict) = evict_addr {
+                    connections.remove(&addr_to_evict);
+                }
+            }
+        }
+
         connections.entry(addr).or_insert_with(|| ConnectionHistory {
             recent_durations: VecDeque::with_capacity(32),
             suspicious_count: 0,
@@ -717,6 +757,35 @@ mod tests {
         let stats = tracker.get_stats(&addr).unwrap();
         assert_eq!(stats.total_connections, 1);
         assert_eq!(stats.decryption_errors, 1);
+    }
+
+    #[test]
+    fn test_connection_tracker_max_entries() {
+        let mut tracker = ConnectionTracker::new(
+            Duration::from_secs(5),
+            Duration::from_secs(300),
+            10,
+        );
+        // Set a small cap for testing
+        tracker.max_tracked_addresses = 3;
+
+        // Add 3 addresses (at cap)
+        for i in 0..3u16 {
+            let addr: SocketAddr = format!("127.0.0.{}:{}", i, 1000 + i).parse().unwrap();
+            tracker.on_connect(addr);
+        }
+
+        let connections = tracker.connections.read().unwrap();
+        assert_eq!(connections.len(), 3);
+        drop(connections);
+
+        // Adding a 4th should evict the oldest
+        let new_addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+        tracker.on_connect(new_addr);
+
+        let connections = tracker.connections.read().unwrap();
+        assert_eq!(connections.len(), 3); // Still capped at 3
+        assert!(connections.contains_key(&new_addr)); // New entry exists
     }
 
     // ========== Timing Jitter Tests ==========

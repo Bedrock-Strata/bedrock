@@ -80,15 +80,19 @@ impl TemplateProvider {
 
         let total_fees: i64 = response.transactions.iter().map(|tx| tx.fee).sum();
 
-        // Parse coinbase transaction
+        // Parse coinbase transaction - reject if missing or empty
         let coinbase = if let Some(data) = response.coinbase_txn.get("data") {
             if let Some(hex_str) = data.as_str() {
-                hex::decode(hex_str).map_err(|e| Error::InvalidTemplate(format!("invalid coinbase: {}", e)))?
+                let cb = hex::decode(hex_str).map_err(|e| Error::InvalidTemplate(format!("invalid coinbase hex: {}", e)))?;
+                if cb.is_empty() {
+                    return Err(Error::InvalidTemplate("coinbase transaction is empty".into()));
+                }
+                cb
             } else {
-                vec![]
+                return Err(Error::InvalidTemplate("coinbase data field is not a string".into()));
             }
         } else {
-            vec![]
+            return Err(Error::InvalidTemplate("coinbase_txn missing data field".into()));
         };
 
         Ok(BlockTemplate {

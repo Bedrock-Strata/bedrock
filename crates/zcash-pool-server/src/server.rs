@@ -217,7 +217,10 @@ impl PoolServer {
             channels: Arc::new(RwLock::new(HashMap::new())),
             session_tx,
             session_rx,
-            current_block_target: Arc::new(RwLock::new([0xff; 32])),
+            // Initialize to impossible target (all zeros) so any share validated
+            // before the first template arrives is rejected. This is fail-closed:
+            // no hash can be <= [0x00; 32] except the zero hash itself.
+            current_block_target: Arc::new(RwLock::new([0x00; 32])),
             jd_server,
             jd_listen_addr,
             noise_responder,

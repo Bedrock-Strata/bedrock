@@ -46,11 +46,19 @@ fn frame_payload(data: &[u8], expected_type: u8) -> Result<&[u8]> {
     Ok(&data[MessageFrame::HEADER_SIZE..total_len])
 }
 
-/// Helper to read a u16-prefixed string
+/// Helper to read a u16-prefixed string.
+/// Validates the declared length against remaining cursor data before allocating.
 fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<String> {
     let len = cursor
         .read_u16::<LittleEndian>()
         .map_err(|e| JdServerError::Protocol(e.to_string()))?;
+    let remaining = cursor.get_ref().len() - cursor.position() as usize;
+    if (len as usize) > remaining {
+        return Err(JdServerError::Protocol(format!(
+            "string length {} exceeds remaining message data ({})",
+            len, remaining
+        )));
+    }
     let mut buf = vec![0u8; len as usize];
     cursor
         .read_exact(&mut buf)
@@ -66,11 +74,19 @@ fn write_string(payload: &mut Vec<u8>, s: &str) {
     payload.write_all(s.as_bytes()).unwrap();
 }
 
-/// Helper to read a u16-prefixed byte vector
+/// Helper to read a u16-prefixed byte vector.
+/// Validates the declared length against remaining cursor data before allocating.
 fn read_bytes_u16(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
     let len = cursor
         .read_u16::<LittleEndian>()
         .map_err(|e| JdServerError::Protocol(e.to_string()))?;
+    let remaining = cursor.get_ref().len() - cursor.position() as usize;
+    if (len as usize) > remaining {
+        return Err(JdServerError::Protocol(format!(
+            "field length {} exceeds remaining message data ({})",
+            len, remaining
+        )));
+    }
     let mut buf = vec![0u8; len as usize];
     cursor
         .read_exact(&mut buf)
@@ -86,11 +102,20 @@ fn write_bytes_u16(payload: &mut Vec<u8>, data: &[u8]) {
     payload.write_all(data).unwrap();
 }
 
-/// Helper to read a u32-prefixed byte vector
+/// Helper to read a u32-prefixed byte vector.
+/// Validates the declared length against remaining cursor data before allocating
+/// to prevent OOM from crafted length fields in malicious messages.
 fn read_bytes_u32(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
     let len = cursor
         .read_u32::<LittleEndian>()
         .map_err(|e| JdServerError::Protocol(e.to_string()))?;
+    let remaining = cursor.get_ref().len() - cursor.position() as usize;
+    if (len as usize) > remaining {
+        return Err(JdServerError::Protocol(format!(
+            "field length {} exceeds remaining message data ({})",
+            len, remaining
+        )));
+    }
     let mut buf = vec![0u8; len as usize];
     cursor
         .read_exact(&mut buf)

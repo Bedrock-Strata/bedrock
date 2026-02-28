@@ -2353,3 +2353,494 @@ module ReconnectBackoffTest {
     .expect(failures.length() == 5)
     .expect(failuresBounded)
 }
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 15: Vardiff Division-by-Zero Bug
+// ═══════════════════════════════════════════════════════════════
+// Models the unguarded division in VardiffController::maybe_retarget()
+// from vardiff.rs:
+//
+//   let minutes = elapsed.as_secs_f64() / 60.0;
+//   let actual_rate = self.shares_since_retarget as f64 / minutes;  // BUG: no zero check
+//   let ratio = actual_rate / target_rate;                           // BUG: no zero check
+//
+// The stats() method guards minutes > 0, but maybe_retarget() does not.
+// If retarget_interval is very short or target_shares_per_minute is 0,
+// these divisions produce NaN/Infinity, corrupting difficulty state.
+
+module VardiffDivZero {
+  import basicSpells.*
+
+  const MIN_DIFF: int
+  const MAX_DIFF: int
+  const TARGET_SPM: int      // target_shares_per_minute (0 = misconfigured)
+  const RETARGET_INT: int    // retarget interval in ticks
+
+  var difficulty: int
+  var shareCount: int
+  var elapsed: int           // ticks since last retarget
+  var gNanEvents: int        // ghost: division-by-zero events
+  var gRetargets: int
+
+  action init = all {
+    difficulty' = clamp(1, MIN_DIFF, MAX_DIFF),
+    shareCount' = 0,
+    elapsed' = 0,
+    gNanEvents' = 0,
+    gRetargets' = 0,
+  }
+
+  action recordShare: bool = all {
+    shareCount' = shareCount + 1,
+    difficulty' = difficulty,
+    elapsed' = elapsed,
+    gNanEvents' = gNanEvents,
+    gRetargets' = gRetargets,
+  }
+
+  action tick: bool = all {
+    elapsed' = elapsed + 1,
+    difficulty' = difficulty,
+    shareCount' = shareCount,
+    gNanEvents' = gNanEvents,
+    gRetargets' = gRetargets,
+  }
+
+  // Model of maybe_retarget() from vardiff.rs
+  // Faithfully reproduces the unguarded division behavior
+  action maybeRetarget: bool = {
+    val minutes = elapsed  // simplified: 1 tick = 1 minute for modeling
+    val canRetarget = elapsed >= RETARGET_INT
+    all {
+      canRetarget,
+      if (minutes == 0) all {
+        // BUG: division by zero! In Rust, 0.0/0.0 = NaN for f64
+        // NaN comparison: any comparison with NaN returns false
+        // So ratio >= lower_bound && ratio <= upper_bound is FALSE
+        // This means NaN always triggers retarget path
+        // Then: difficulty * NaN = NaN, NaN.clamp() = NaN, final = NaN
+        gNanEvents' = gNanEvents + 1,
+        // NaN poisons the difficulty: all future comparisons fail
+        difficulty' = 0,  // model NaN as 0 (invalid difficulty)
+        shareCount' = 0,
+        elapsed' = 0,
+        gRetargets' = gRetargets + 1,
+      }
+      else if (TARGET_SPM == 0) all {
+        // BUG: division by target_rate which is 0
+        // actual_rate / 0.0 = Infinity for f64
+        // Infinity >= lower_bound is TRUE
+        // Infinity <= upper_bound is FALSE (unless upper_bound is Infinity)
+        // So this always triggers retarget with adjustment = Infinity
+        // difficulty * Infinity = Infinity, Infinity.clamp(min, max) = max
+        gNanEvents' = gNanEvents + 1,
+        difficulty' = MAX_DIFF,  // Infinity clamped to max
+        shareCount' = 0,
+        elapsed' = 0,
+        gRetargets' = gRetargets + 1,
+      }
+      else {
+        // Normal path: compute ratio and adjust
+        val actualRate = shareCount * 100 / minutes  // scaled integer math
+        val targetRate = TARGET_SPM * 100
+        val ratio100 = if (targetRate > 0) actualRate * 100 / targetRate else 100
+        // tolerance check: ratio in [75, 125] for 25% tolerance
+        val inTolerance = ratio100 >= 75 and ratio100 <= 125
+        if (inTolerance) all {
+          shareCount' = 0,
+          elapsed' = 0,
+          difficulty' = difficulty,
+          gNanEvents' = gNanEvents,
+          gRetargets' = gRetargets,
+        } else {
+          // Adjust: new = current * ratio, smoothed = (current + new) / 2
+          val adjustment = if (ratio100 > 0) ratio100 else 50
+          val rawNew = difficulty * adjustment / 100
+          val smoothed = (difficulty + rawNew) / 2
+          val clamped = clamp(smoothed, MIN_DIFF, MAX_DIFF)
+          val changed = abs(clamped - difficulty) > 0
+          all {
+            difficulty' = if (changed) clamped else difficulty,
+            shareCount' = 0,
+            elapsed' = 0,
+            gNanEvents' = gNanEvents,
+            gRetargets' = gRetargets + (if (changed) 1 else 0),
+          }
+        }
+      }
+    }
+  }
+
+  action step = any {
+    recordShare,
+    tick,
+    maybeRetarget,
+  }
+
+  // INVARIANT: difficulty is always valid (not NaN/0)
+  // Expected: VIOLATED when minutes=0 or TARGET_SPM=0
+  val difficultyValid = difficulty > 0
+
+  // INVARIANT: difficulty stays in bounds
+  val difficultyInBounds = difficulty >= MIN_DIFF and difficulty <= MAX_DIFF
+
+  // Ghost: NaN events should never happen in correct code
+  val noNanEvents = gNanEvents == 0
+}
+
+module VardiffDivZeroTest {
+  // Test with TARGET_SPM = 0 (misconfigured)
+  import VardiffDivZero(
+    MIN_DIFF = 1, MAX_DIFF = 1000, TARGET_SPM = 0, RETARGET_INT = 1,
+  ).*
+
+  // BUG: target_shares_per_minute = 0 causes division by zero
+  // ratio = actual_rate / 0.0 = Infinity
+  // difficulty becomes MAX_DIFF regardless of share rate
+  run targetZeroBug = init
+    .then(recordShare).then(recordShare).then(recordShare)
+    .then(tick)
+    .then(maybeRetarget)
+    .expect(gNanEvents == 1)
+    .expect(difficulty == MAX_DIFF)  // Infinity clamped to max
+}
+
+module VardiffDivZeroMinutesTest {
+  // Test with RETARGET_INT = 0 (immediate retarget)
+  import VardiffDivZero(
+    MIN_DIFF = 1, MAX_DIFF = 1000, TARGET_SPM = 5, RETARGET_INT = 0,
+  ).*
+
+  // BUG: retarget fires immediately when elapsed=0
+  // minutes = 0, actual_rate = shares / 0 = NaN
+  // NaN poisons all subsequent difficulty calculations
+  run minutesZeroBug = init
+    .then(maybeRetarget)
+    .expect(gNanEvents == 1)
+    .expect(difficulty == 0)  // NaN modeled as 0 (invalid)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 16: Duplicate Detector Cross-Block Race
+// ═══════════════════════════════════════════════════════════════
+// Models the race between share validation and clear_all() from
+// duplicate.rs + server.rs:
+//
+// Timeline:
+//   1. Share S arrives, passes dup check (not in set), enters validation
+//   2. New block arrives, clear_all() wipes the duplicate set
+//   3. Share S (or identical retry) arrives again
+//   4. Share S passes dup check AGAIN (set was cleared)
+//   5. Both copies are accepted → double-counted in payout
+//
+// The root cause: check_and_record() and validate_share() are not
+// atomic with respect to clear_all().
+
+module DuplicateRace {
+  import basicSpells.*
+
+  const JOBS: Set[int]
+
+  // Duplicate detector state (models InMemoryDuplicateDetector)
+  var dupSets: int -> Set[int]   // job_id -> set of share hashes
+
+  // In-flight shares (being validated, not yet recorded)
+  var inflight: Set[(int, int)]  // (job_id, hash) — passed dup check, in validation
+
+  // Payout accounting
+  var payouts: int -> int        // job_id -> shares accepted
+  var gDoublePayouts: int        // ghost: shares paid twice
+
+  action init = all {
+    dupSets' = JOBS.mapBy(_ => Set()),
+    inflight' = Set(),
+    payouts' = JOBS.mapBy(_ => 0),
+    gDoublePayouts' = 0,
+  }
+
+  // Phase 1: Share arrives, passes dup check, enters validation queue
+  action submitShare(jid: int, hash: int): bool = {
+    val hasDups = dupSets.keys().contains(jid)
+    val existing = if (hasDups) dupSets.get(jid) else Set()
+    val isDup = existing.contains(hash)
+    all {
+      JOBS.contains(jid),
+      hash > 0,
+      not(isDup),  // passes dup check
+      // Record in dup set AND add to inflight
+      dupSets' = dupSets.put(jid, existing.union(Set(hash))),
+      inflight' = inflight.union(Set((jid, hash))),
+      payouts' = payouts,
+      gDoublePayouts' = gDoublePayouts,
+    }
+  }
+
+  // Phase 2: Validation completes, share accepted
+  action acceptShare(jid: int, hash: int): bool = all {
+    inflight.contains((jid, hash)),
+    inflight' = inflight.exclude(Set((jid, hash))),
+    payouts' = payouts.setBy(jid, p => p + 1),
+    dupSets' = dupSets,
+    gDoublePayouts' = gDoublePayouts,
+  }
+
+  // New block: clear_all() wipes duplicate detector
+  // Can happen while shares are inflight!
+  action newBlock: bool = all {
+    dupSets' = JOBS.mapBy(_ => Set()),  // clear_all()
+    // inflight shares are NOT cleared — they continue validation
+    inflight' = inflight,
+    payouts' = payouts,
+    gDoublePayouts' = gDoublePayouts,
+  }
+
+  // Resubmit: same share arrives again after clear_all
+  // If the original was inflight when clear happened, this passes dup check
+  action resubmitAfterClear(jid: int, hash: int): bool = {
+    val hasDups = dupSets.keys().contains(jid)
+    val existing = if (hasDups) dupSets.get(jid) else Set()
+    val isDup = existing.contains(hash)
+    // This share was already accepted (or inflight) but dup set was cleared
+    val alreadyPaid = payouts.get(jid) > 0 or inflight.contains((jid, hash))
+    all {
+      JOBS.contains(jid),
+      hash > 0,
+      not(isDup),        // passes dup check (set was cleared!)
+      alreadyPaid,       // this is actually a double-payout scenario
+      dupSets' = dupSets.put(jid, existing.union(Set(hash))),
+      inflight' = inflight.union(Set((jid, hash))),
+      payouts' = payouts,
+      gDoublePayouts' = gDoublePayouts + 1,
+    }
+  }
+
+  action step = {
+    nondet jid = JOBS.oneOf()
+    nondet hash = 1.to(10).oneOf()
+    any {
+      submitShare(jid, hash),
+      acceptShare(jid, hash),
+      newBlock,
+      resubmitAfterClear(jid, hash),
+    }
+  }
+
+  // INVARIANT: no share should be paid twice
+  // Expected: VIOLATED — proving the race condition
+  val noDoublePayout = gDoublePayouts == 0
+
+  // Safety: payouts are non-negative
+  val payoutsNonNeg = JOBS.forall(j => payouts.get(j) >= 0)
+}
+
+module DuplicateRaceTest {
+  import DuplicateRace(JOBS = Set(1, 2)).*
+
+  // Demonstrate the cross-block duplicate race:
+  // 1. Share (job=1, hash=42) submitted and accepted
+  // 2. New block clears duplicate detector
+  // 3. Same share resubmitted — passes dup check because set was cleared
+  // 4. Double payout!
+  run crossBlockDupRace = init
+    .then(submitShare(1, 42))
+    .then(acceptShare(1, 42))
+    .expect(payouts.get(1) == 1)
+    .then(newBlock)                      // clear_all() wipes dup set
+    .then(resubmitAfterClear(1, 42))    // same share passes dup check!
+    .then(acceptShare(1, 42))
+    .expect(payouts.get(1) == 2)         // double payout
+    .expect(gDoublePayouts == 1)
+
+  // Inflight race: share is being validated when clear happens
+  run inflightRace = init
+    .then(submitShare(1, 7))             // share enters validation
+    .then(newBlock)                      // clear_all() while share inflight
+    .then(resubmitAfterClear(1, 7))     // resubmit passes dup check
+    .expect(gDoublePayouts == 1)
+    .then(acceptShare(1, 7))             // original inflight accepted
+    .then(acceptShare(1, 7))             // resubmit also accepted
+    .expect(payouts.get(1) == 2)         // double payout
+
+  // Normal case without race: no double payouts
+  run noRace = init
+    .then(submitShare(1, 1))
+    .then(acceptShare(1, 1))
+    .then(submitShare(1, 2))
+    .then(acceptShare(1, 2))
+    .expect(gDoublePayouts == 0)
+    .expect(payouts.get(1) == 2)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 17: Vardiff Update Lost on Channel Removal (3-Lock TOCTOU)
+// ═══════════════════════════════════════════════════════════════
+// Models the 3-lock pattern from server.rs where vardiff updates
+// are silently lost when a channel is removed between lock acquisitions:
+//
+//   Lock 1: channels.write() → rate_limit check → release
+//   Lock 2: channels.read()  → job lookup (clone) → release
+//   [validation runs lock-free]
+//   Lock 3: channels.write() → record_share + vardiff → release
+//
+// Between Lock 2 and Lock 3, another task can disconnect the session
+// and remove the channel. The vardiff update is silently lost (the
+// `if let Some(channel)` branch at line 869 takes the None path).
+//
+// Impact: difficulty adjustment never happens for that share,
+// and the payout tracker still records the share (line 891) even
+// though vardiff was not updated — inconsistent state.
+
+module VardiffLostUpdate {
+  import basicSpells.*
+
+  const MINERS: Set[int]
+
+  // Phase: 0=Idle, 1=RateChecked, 2=JobLookedUp, 3=Validated
+  var phase: int -> int
+  var channels: Set[int]           // set of active channel IDs
+  var vardiffShares: int -> int    // per-miner share count for vardiff
+  var payoutShares: int -> int     // per-miner payout share count
+  var gLostUpdates: int            // ghost: vardiff updates silently lost
+  var gPayoutWithoutVardiff: int   // ghost: payout recorded without vardiff
+
+  action init = all {
+    phase' = MINERS.mapBy(_ => 0),
+    channels' = MINERS,  // all miners connected initially
+    vardiffShares' = MINERS.mapBy(_ => 0),
+    payoutShares' = MINERS.mapBy(_ => 0),
+    gLostUpdates' = 0,
+    gPayoutWithoutVardiff' = 0,
+  }
+
+  // Lock 1: rate check (acquire write lock, check, release)
+  action rateCheck(m: int): bool = all {
+    MINERS.contains(m),
+    channels.contains(m),
+    phase.get(m) == 0,
+    phase' = phase.set(m, 1),
+    channels' = channels, vardiffShares' = vardiffShares,
+    payoutShares' = payoutShares,
+    gLostUpdates' = gLostUpdates, gPayoutWithoutVardiff' = gPayoutWithoutVardiff,
+  }
+
+  // Lock 2: job lookup (acquire read lock, clone job, release)
+  action jobLookup(m: int): bool = all {
+    MINERS.contains(m),
+    channels.contains(m),
+    phase.get(m) == 1,
+    phase' = phase.set(m, 2),
+    channels' = channels, vardiffShares' = vardiffShares,
+    payoutShares' = payoutShares,
+    gLostUpdates' = gLostUpdates, gPayoutWithoutVardiff' = gPayoutWithoutVardiff,
+  }
+
+  // Validation (no lock held — Equihash validation runs here)
+  action validate(m: int): bool = all {
+    MINERS.contains(m),
+    phase.get(m) == 2,
+    phase' = phase.set(m, 3),
+    channels' = channels, vardiffShares' = vardiffShares,
+    payoutShares' = payoutShares,
+    gLostUpdates' = gLostUpdates, gPayoutWithoutVardiff' = gPayoutWithoutVardiff,
+  }
+
+  // Lock 3: record vardiff + payout
+  // Bug: if channel was removed, vardiff update is lost but payout still records
+  action recordResult(m: int): bool = {
+    val channelExists = channels.contains(m)
+    all {
+      MINERS.contains(m),
+      phase.get(m) == 3,
+      phase' = phase.set(m, 0),
+      // Payout ALWAYS records (line 891 runs regardless of channel existence)
+      payoutShares' = payoutShares.setBy(m, s => s + 1),
+      if (channelExists) all {
+        // Normal: vardiff updated
+        vardiffShares' = vardiffShares.setBy(m, s => s + 1),
+        gLostUpdates' = gLostUpdates,
+        gPayoutWithoutVardiff' = gPayoutWithoutVardiff,
+      } else all {
+        // BUG: channel removed — vardiff update silently lost
+        vardiffShares' = vardiffShares,
+        gLostUpdates' = gLostUpdates + 1,
+        gPayoutWithoutVardiff' = gPayoutWithoutVardiff + 1,
+      },
+      channels' = channels,
+    }
+  }
+
+  // External: session disconnects, channel removed
+  // Can happen between any phases!
+  action disconnect(m: int): bool = all {
+    MINERS.contains(m),
+    channels.contains(m),
+    channels' = channels.exclude(Set(m)),
+    phase' = phase, vardiffShares' = vardiffShares,
+    payoutShares' = payoutShares,
+    gLostUpdates' = gLostUpdates, gPayoutWithoutVardiff' = gPayoutWithoutVardiff,
+  }
+
+  action step = {
+    nondet m = MINERS.oneOf()
+    any {
+      rateCheck(m),
+      jobLookup(m),
+      validate(m),
+      recordResult(m),
+      disconnect(m),
+    }
+  }
+
+  // INVARIANT: vardiff and payout share counts should match
+  // Expected: VIOLATED — proves the inconsistency
+  val vardiffPayoutConsistent = MINERS.forall(m =>
+    vardiffShares.get(m) == payoutShares.get(m))
+
+  // INVARIANT: no lost updates
+  // Expected: VIOLATED
+  val noLostUpdates = gLostUpdates == 0
+
+  // Safety: all counters non-negative
+  val countersValid = MINERS.forall(m =>
+    vardiffShares.get(m) >= 0 and payoutShares.get(m) >= 0)
+}
+
+module VardiffLostUpdateTest {
+  import VardiffLostUpdate(MINERS = Set(1, 2)).*
+
+  // Demonstrate the lost vardiff update:
+  // 1. Miner passes rate check and job lookup
+  // 2. Validation runs (no lock)
+  // 3. Session disconnects, channel removed
+  // 4. recordResult: payout records, but vardiff update is lost
+  run lostVardiffUpdate = init
+    .then(rateCheck(1))
+    .then(jobLookup(1))
+    .then(validate(1))
+    .then(disconnect(1))          // channel removed during validation!
+    .then(recordResult(1))        // vardiff lost, payout still recorded
+    .expect(gLostUpdates == 1)
+    .expect(gPayoutWithoutVardiff == 1)
+    .expect(payoutShares.get(1) == 1)
+    .expect(vardiffShares.get(1) == 0)  // inconsistent!
+
+  // Two miners: one disconnects, other is fine
+  run oneDisconnectOneOk = init
+    .then(rateCheck(1)).then(rateCheck(2))
+    .then(jobLookup(1)).then(jobLookup(2))
+    .then(validate(1)).then(validate(2))
+    .then(disconnect(1))          // only miner 1 disconnects
+    .then(recordResult(1))        // miner 1: lost update
+    .then(recordResult(2))        // miner 2: normal
+    .expect(gLostUpdates == 1)
+    .expect(vardiffShares.get(2) == payoutShares.get(2))  // miner 2 consistent
+
+  // Without disconnect, everything is consistent
+  run noDisconnect = init
+    .then(rateCheck(1))
+    .then(jobLookup(1))
+    .then(validate(1))
+    .then(recordResult(1))
+    .expect(gLostUpdates == 0)
+    .expect(vardiffShares.get(1) == payoutShares.get(1))
+}

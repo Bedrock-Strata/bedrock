@@ -101,7 +101,11 @@ impl VardiffController {
         }
 
         let minutes = elapsed.as_secs_f64() / 60.0;
-        let actual_rate = self.shares_since_retarget as f64 / minutes;
+        let actual_rate = if minutes > 0.0 {
+            self.shares_since_retarget as f64 / minutes
+        } else {
+            0.0
+        };
         let target_rate = self.config.target_shares_per_minute;
 
         debug!(
@@ -113,7 +117,11 @@ impl VardiffController {
         );
 
         // Check if we're within tolerance
-        let ratio = actual_rate / target_rate;
+        let ratio = if target_rate > 0.0 {
+            actual_rate / target_rate
+        } else {
+            0.0
+        };
         let lower_bound = 1.0 - self.config.variance_tolerance;
         let upper_bound = 1.0 + self.config.variance_tolerance;
 

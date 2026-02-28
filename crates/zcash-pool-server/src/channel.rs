@@ -172,6 +172,11 @@ impl Channel {
             .unwrap_or(false)
     }
 
+    /// Return the set of all job IDs tracked by this channel
+    pub fn active_job_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.jobs.keys().copied()
+    }
+
     /// Check if a job is active with a custom TTL
     pub fn is_job_active_with_ttl(&self, job_id: u32, ttl: Duration) -> bool {
         self.jobs

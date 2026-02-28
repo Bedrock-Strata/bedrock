@@ -3,7 +3,7 @@
 //! Uses a trait to allow swapping implementations (in-memory, Redis, etc.)
 
 use rustc_hash::FxHashSet;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use tracing::warn;
 
@@ -22,6 +22,10 @@ pub trait DuplicateDetector: Send + Sync {
 
     /// Clear all jobs (called on new block)
     fn clear_all(&self);
+
+    /// Remove entries for jobs not in the active set.
+    /// Prevents unbounded memory growth without the race condition of clear_all().
+    fn prune_inactive(&self, active_job_ids: &HashSet<u32>);
 }
 
 /// Result of duplicate check
@@ -117,6 +121,16 @@ impl DuplicateDetector for InMemoryDuplicateDetector {
         });
         jobs.clear();
     }
+
+    fn prune_inactive(&self, active_job_ids: &HashSet<u32>) {
+        let mut jobs = self.jobs.write().unwrap_or_else(|e| {
+            warn!(
+                "Duplicate detector lock was poisoned in prune_inactive, recovering"
+            );
+            e.into_inner()
+        });
+        jobs.retain(|job_id, _| active_job_ids.contains(job_id));
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +189,28 @@ mod tests {
         // After clear_all, both are not duplicates
         assert!(!detector.check_and_record(1, &nonce_2, &solution));
         assert!(!detector.check_and_record(2, &nonce_2, &solution));
+    }
+
+    #[test]
+    fn test_prune_inactive() {
+        let detector = InMemoryDuplicateDetector::new();
+
+        let nonce_2 = vec![0x01, 0x02, 0x03];
+        let solution = vec![0xaa; 1344];
+
+        detector.check_and_record(1, &nonce_2, &solution);
+        detector.check_and_record(2, &nonce_2, &solution);
+        detector.check_and_record(3, &nonce_2, &solution);
+
+        // Only keep jobs 2 and 3 as active
+        let active: HashSet<u32> = [2, 3].into_iter().collect();
+        detector.prune_inactive(&active);
+
+        // Job 1 was pruned, so same share is not a duplicate
+        assert!(!detector.check_and_record(1, &nonce_2, &solution));
+
+        // Jobs 2 and 3 still have their state, so same shares are duplicates
+        assert!(detector.check_and_record(2, &nonce_2, &solution));
+        assert!(detector.check_and_record(3, &nonce_2, &solution));
     }
 }

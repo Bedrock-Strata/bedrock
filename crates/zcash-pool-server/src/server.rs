@@ -23,7 +23,7 @@ use crate::payout::{MinerId, PayoutTracker};
 use crate::security::{ConnectionTracker, SequenceCheckResult, SequenceValidator, TimingJitter};
 use crate::session::{ServerMessage, Session, SessionMessage, Transport};
 use crate::share::ShareProcessor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -686,14 +686,20 @@ impl PoolServer {
             distributor.update_template(template)
         };
 
-        // Clear duplicate detector on new block
-        if is_new_block {
-            self.duplicate_detector.clear_all();
-            info!("New block detected, cleared duplicate detector");
-        }
-
         // Broadcast jobs to all sessions
         self.broadcast_jobs(is_new_block).await?;
+
+        // Prune stale job entries from the duplicate detector.
+        // We do this AFTER broadcasting so that in-flight shares for old jobs
+        // can still be checked against the detector before their entries are removed.
+        if is_new_block {
+            let active_job_ids: HashSet<u32> = {
+                let channels = self.channels.read().await;
+                channels.values().flat_map(|ch| ch.active_job_ids()).collect()
+            };
+            self.duplicate_detector.prune_inactive(&active_job_ids);
+            info!("New block detected, pruned inactive jobs from duplicate detector");
+        }
 
         Ok(())
     }
@@ -862,35 +868,39 @@ impl PoolServer {
             &block_target,
         );
 
-        // Apply vardiff update if the share was accepted
-        let maybe_new_target = if let Ok(ref validation) = result {
+        // Apply vardiff update and record payout atomically under one lock.
+        // This prevents the channel from being removed between the two operations.
+        let (maybe_new_target, _accepted_info) = if let Ok(ref validation) = result {
             if validation.accepted {
+                let difficulty = validation.difficulty;
+                let is_block = validation.is_block;
                 let mut channels = self.channels.write().await;
                 if let Some(channel) = channels.get_mut(&channel_id) {
-                    if channel.record_share().is_some() {
+                    let new_target = if channel.record_share().is_some() {
                         Some(channel.current_target())
                     } else {
                         None
+                    };
+                    // Record payout inside same lock scope
+                    if let Some(diff) = difficulty {
+                        let miner_id: MinerId = format!("channel_{}", channel_id);
+                        self.payout_tracker.record_share(&miner_id, diff);
                     }
+                    (new_target, Some((difficulty, is_block)))
                 } else {
-                    None
+                    warn!("Channel {} removed during share validation", channel_id);
+                    (None, None)
                 }
             } else {
-                None
+                (None, Some((None, false)))
             }
         } else {
-            None
+            (None, None)
         };
 
         let share_result = match result {
             Ok(validation) => {
                 if validation.accepted {
-                    // Track payout
-                    if let Some(difficulty) = validation.difficulty {
-                        let miner_id: MinerId = format!("channel_{}", channel_id);
-                        self.payout_tracker.record_share(&miner_id, difficulty);
-                    }
-
                     // Check for block find
                     if validation.is_block {
                         info!(

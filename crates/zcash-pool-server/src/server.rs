@@ -706,9 +706,19 @@ impl PoolServer {
 
     /// Broadcast new jobs to all connected sessions
     async fn broadcast_jobs(&self, clean_jobs: bool) -> Result<()> {
-        // Collect senders and jobs while holding locks, then drop locks before sending
-        let jobs_to_send = {
+        // Collect session senders first, then release the sessions lock before
+        // acquiring channels.write(). This prevents sessions.read() from being
+        // held while channels.write() is acquired, which would block all share
+        // submissions for the duration of job creation.
+        let session_senders: Vec<(u32, mpsc::Sender<ServerMessage>)> = {
             let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .map(|(&id, sender)| (id, sender.clone()))
+                .collect()
+        };
+
+        let jobs_to_send = {
             let distributor = self.job_distributor.read().await;
 
             if !distributor.has_template() {
@@ -719,8 +729,8 @@ impl PoolServer {
 
             {
                 let mut channels = self.channels.write().await;
-                for (&channel_id, sender) in sessions.iter() {
-                    if let Some(channel) = channels.get_mut(&channel_id) {
+                for (channel_id, sender) in &session_senders {
+                    if let Some(channel) = channels.get_mut(channel_id) {
                         if let Some(job) = distributor.create_job(channel, clean_jobs) {
                             channel.add_job(job.clone(), clean_jobs);
                             jobs.push((sender.clone(), job));
@@ -731,7 +741,6 @@ impl PoolServer {
 
             jobs
         };
-        // sessions and distributor locks are now dropped
 
         let mut broadcast_count = 0;
         for (sender, job) in jobs_to_send {
@@ -759,14 +768,11 @@ impl PoolServer {
                     .await
             }
             SessionMessage::Disconnected { channel_id } => {
+                // Cleanup is handled by the spawned session task on exit
+                // (see handle_new_connection). This message is informational only
+                // to avoid a double-cleanup race between the task exit path and
+                // this message handler.
                 info!("Session {} disconnected", channel_id);
-                // Clean up atomically - take both locks before modifying either
-                {
-                    let mut sessions_guard = self.sessions.write().await;
-                    let mut channels_guard = self.channels.write().await;
-                    sessions_guard.remove(&channel_id);
-                    channels_guard.remove(&channel_id);
-                }
                 Ok(())
             }
         }

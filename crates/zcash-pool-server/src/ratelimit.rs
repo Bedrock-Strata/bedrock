@@ -86,9 +86,12 @@ impl RateLimiter {
     pub fn time_until_available(&self) -> Duration {
         if self.tokens >= 1.0 {
             Duration::ZERO
-        } else {
+        } else if self.refill_rate > 0.0 {
             let needed = 1.0 - self.tokens;
             Duration::from_secs_f64(needed / self.refill_rate)
+        } else {
+            // Zero refill rate means tokens never regenerate
+            Duration::MAX
         }
     }
 }

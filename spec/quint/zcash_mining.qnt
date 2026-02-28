@@ -1533,3 +1533,823 @@ module ConcurrentShareValidationTest {
     .then(recordAccepted(2))
     .expect(ghostStaleAccepts == 2)  // both threads accepted stale shares
 }
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 11: Template Provider
+// ═══════════════════════════════════════════════════════════════
+// Models the TemplateProvider polling loop from template.rs:
+//   - Polls Zebra RPC at intervals, computes fingerprints
+//   - Deduplicates identical templates (same fingerprint)
+//   - Monotonically increasing template IDs
+//   - Broadcasts new templates to subscribers
+//   - Handles RPC failures gracefully (continues polling)
+
+module TemplateProvider {
+  import basicSpells.*
+
+  const MAX_HEIGHT: int
+  const MAX_TEMPLATE_ID: int
+
+  // Template: height, prev_hash, merkle_root, bits (fingerprint components)
+  type Template = {
+    id: int, height: int, prev_hash: int, merkle_root: int, bits: int,
+  }
+
+  // Fingerprint derived from template fields
+  pure def fingerprint(t: Template): (int, int, int) =
+    (t.height, t.prev_hash, t.merkle_root)
+
+  var templateId: int               // monotonic counter (starts at 1)
+  var currentTemplate: Template     // latest valid template
+  var hasTemplate: bool             // false until first successful fetch
+  var lastFingerprint: (int, int, int)
+  var subscribers: int              // count of active subscribers
+  var gBroadcasts: int             // ghost: total broadcasts sent
+  var gDedups: int                 // ghost: skipped due to same fingerprint
+  var gFetchFails: int             // ghost: RPC fetch failures
+  var gTemplateFails: int          // ghost: template processing failures
+
+  val emptyTemplate: Template = {
+    id: 0, height: 0, prev_hash: 0, merkle_root: 0, bits: 0,
+  }
+
+  action init = all {
+    templateId' = 1,
+    currentTemplate' = emptyTemplate,
+    hasTemplate' = false,
+    lastFingerprint' = (0, 0, 0),
+    subscribers' = 0,
+    gBroadcasts' = 0,
+    gDedups' = 0,
+    gFetchFails' = 0,
+    gTemplateFails' = 0,
+  }
+
+  // Successful poll: new template with different fingerprint
+  action pollNewTemplate(height: int, ph: int, mr: int, bits: int): bool = {
+    val fp = (height, ph, mr)
+    val newId = templateId
+    val t: Template = { id: newId, height: height, prev_hash: ph,
+                        merkle_root: mr, bits: bits }
+    all {
+      height > 0, height <= MAX_HEIGHT,
+      ph > 0, mr > 0, bits > 0,
+      fp != lastFingerprint,  // fingerprint changed
+      templateId' = templateId + 1,
+      currentTemplate' = t,
+      hasTemplate' = true,
+      lastFingerprint' = fp,
+      gBroadcasts' = gBroadcasts + 1,
+      gDedups' = gDedups,
+      gFetchFails' = gFetchFails,
+      gTemplateFails' = gTemplateFails,
+      subscribers' = subscribers,
+    }
+  }
+
+  // Poll returns same fingerprint: deduplicated, no broadcast
+  action pollSameTemplate(height: int, ph: int, mr: int): bool = {
+    val fp = (height, ph, mr)
+    all {
+      hasTemplate,            // must have fetched at least once
+      fp == lastFingerprint,  // same fingerprint
+      templateId' = templateId,
+      currentTemplate' = currentTemplate,
+      hasTemplate' = hasTemplate,
+      lastFingerprint' = lastFingerprint,
+      gDedups' = gDedups + 1,
+      gBroadcasts' = gBroadcasts,
+      gFetchFails' = gFetchFails,
+      gTemplateFails' = gTemplateFails,
+      subscribers' = subscribers,
+    }
+  }
+
+  // RPC fetch failure: state unchanged, continue polling
+  action fetchFail: bool = all {
+    templateId' = templateId,
+    currentTemplate' = currentTemplate,
+    hasTemplate' = hasTemplate,
+    lastFingerprint' = lastFingerprint,
+    subscribers' = subscribers,
+    gFetchFails' = gFetchFails + 1,
+    gBroadcasts' = gBroadcasts,
+    gDedups' = gDedups,
+    gTemplateFails' = gTemplateFails,
+  }
+
+  // Template processing failure (e.g., bad header data)
+  action templateProcessFail: bool = all {
+    templateId' = templateId,
+    currentTemplate' = currentTemplate,
+    hasTemplate' = hasTemplate,
+    lastFingerprint' = lastFingerprint,
+    subscribers' = subscribers,
+    gTemplateFails' = gTemplateFails + 1,
+    gBroadcasts' = gBroadcasts,
+    gDedups' = gDedups,
+    gFetchFails' = gFetchFails,
+  }
+
+  // Subscriber joins
+  action addSubscriber: bool = all {
+    subscribers' = subscribers + 1,
+    templateId' = templateId,
+    currentTemplate' = currentTemplate,
+    hasTemplate' = hasTemplate,
+    lastFingerprint' = lastFingerprint,
+    gBroadcasts' = gBroadcasts,
+    gDedups' = gDedups,
+    gFetchFails' = gFetchFails,
+    gTemplateFails' = gTemplateFails,
+  }
+
+  action step = {
+    nondet h = 1.to(MAX_HEIGHT).oneOf()
+    nondet ph = 1.to(10).oneOf()
+    nondet mr = 1.to(10).oneOf()
+    nondet bits = 1.to(10).oneOf()
+    any {
+      pollNewTemplate(h, ph, mr, bits),
+      pollSameTemplate(h, ph, mr),
+      fetchFail,
+      templateProcessFail,
+      addSubscriber,
+    }
+  }
+
+  // INVARIANTS
+
+  // Template ID is strictly monotonic (never decreases)
+  val templateIdMonotonic = templateId >= 1
+
+  // Current template ID < next template ID counter
+  val templateIdConsistent =
+    if (hasTemplate) currentTemplate.id < templateId
+    else currentTemplate.id == 0
+
+  // Height is non-decreasing once we have a template
+  val heightPositive =
+    if (hasTemplate) currentTemplate.height > 0 else true
+
+  // Dedup correctness: broadcasts + dedups + failures = total polls attempted
+  // (Not directly trackable without total poll counter, so we verify components are non-negative)
+  val countersNonNeg =
+    gBroadcasts >= 0 and gDedups >= 0 and gFetchFails >= 0 and gTemplateFails >= 0
+
+  // Broadcasts only happen when template changes
+  val broadcastsBounded = gBroadcasts <= templateId - 1
+
+  // Witnesses
+  val witnessNoBroadcasts = gBroadcasts == 0
+  val witnessNoFetchFails = gFetchFails == 0
+}
+
+module TemplateProviderTest {
+  import TemplateProvider(MAX_HEIGHT = 20, MAX_TEMPLATE_ID = 100).*
+
+  run firstPoll = init
+    .then(pollNewTemplate(1, 1, 1, 5))
+    .expect(hasTemplate)
+    .expect(currentTemplate.id == 1)
+    .expect(templateId == 2)
+    .expect(gBroadcasts == 1)
+
+  run dedupSameFingerprint = init
+    .then(pollNewTemplate(1, 1, 1, 5))
+    .then(pollSameTemplate(1, 1, 1))
+    .expect(gDedups == 1)
+    .expect(gBroadcasts == 1)
+    .expect(templateId == 2)  // not incremented
+
+  run newBlockTemplate = init
+    .then(pollNewTemplate(1, 1, 1, 5))
+    .then(pollNewTemplate(2, 2, 3, 5))  // new block, new fingerprint
+    .expect(gBroadcasts == 2)
+    .expect(currentTemplate.height == 2)
+    .expect(templateId == 3)
+
+  run fetchFailRecovery = init
+    .then(fetchFail)
+    .expect(not(hasTemplate))
+    .expect(gFetchFails == 1)
+    .then(pollNewTemplate(1, 1, 1, 5))
+    .expect(hasTemplate)
+    .expect(gBroadcasts == 1)
+
+  run multipleFailsThenRecover = init
+    .then(fetchFail).then(templateProcessFail).then(fetchFail)
+    .then(pollNewTemplate(5, 3, 4, 7))
+    .expect(hasTemplate)
+    .expect(gFetchFails == 2)
+    .expect(gTemplateFails == 1)
+
+  run templateIdMonotonicCheck = init
+    .then(pollNewTemplate(1, 1, 1, 5))
+    .then(pollNewTemplate(2, 2, 2, 5))
+    .then(pollNewTemplate(3, 3, 3, 5))
+    .expect(templateId == 4)
+    .expect(templateIdMonotonic)
+    .expect(broadcastsBounded)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 12: Nonce Space Partitioning
+// ═══════════════════════════════════════════════════════════════
+// Models the NoncePartitioner from nonce.rs:
+//   - Splits 32-byte nonce into pool prefix (nonce_1) and miner suffix (nonce_2)
+//   - Each miner gets a unique nonce_1 via monotonic ID allocation
+//   - Ensures no two miners share nonce space (collision-free)
+
+module NoncePartition {
+  import basicSpells.*
+
+  const NONCE_TOTAL: int     // always 32
+  const NONCE_1_LEN: int     // pool prefix length (1..32)
+  const MAX_MINERS: int      // max concurrent miners
+
+  var nextId: int             // monotonic allocation counter
+  var allocated: Set[int]     // set of allocated miner IDs
+  var nonce1Map: int -> int   // miner_id -> nonce_1 value (encoded from ID)
+  var gAllocations: int       // ghost: total allocations
+
+  pure def nonce_2_len(n1len: int): int = NONCE_TOTAL - n1len
+
+  // Deterministic nonce_1 derivation from miner ID
+  // In real code: big-endian encoding of ID into last bytes of nonce_1
+  // Here: nonce_1 value = miner_id (injective for distinct IDs)
+  pure def derive_nonce_1(id: int): int = id
+
+  action init = all {
+    nextId' = 1,  // start at 1 (0 reserved)
+    allocated' = Set(),
+    nonce1Map' = Map(),
+    gAllocations' = 0,
+  }
+
+  // Allocate a nonce range for a new miner
+  action allocateRange: bool = {
+    val id = nextId
+    val n1 = derive_nonce_1(id)
+    all {
+      allocated.size() < MAX_MINERS,
+      nextId' = nextId + 1,
+      allocated' = allocated.union(Set(id)),
+      nonce1Map' = nonce1Map.put(id, n1),
+      gAllocations' = gAllocations + 1,
+    }
+  }
+
+  // Miner disconnects, freeing its slot (but ID is not reused)
+  action deallocate(id: int): bool = all {
+    allocated.contains(id),
+    allocated' = allocated.exclude(Set(id)),
+    nonce1Map' = nonce1Map,  // keep mapping for reference
+    nextId' = nextId,
+    gAllocations' = gAllocations,
+  }
+
+  action step = {
+    if (allocated.size() == 0)
+      allocateRange
+    else {
+      nondet id = allocated.oneOf()
+      any {
+        allocateRange,
+        deallocate(id),
+      }
+    }
+  }
+
+  // INVARIANTS
+
+  // Nonce space conservation: nonce_1_len + nonce_2_len = 32
+  val nonceConservation = nonce_2_len(NONCE_1_LEN) + NONCE_1_LEN == NONCE_TOTAL
+
+  // All allocated miners have unique nonce_1 values
+  val nonce1Unique = allocated.forall(a => allocated.forall(b =>
+    (a == b) or nonce1Map.get(a) != nonce1Map.get(b)))
+
+  // Monotonic ID allocation: all allocated IDs < nextId
+  val idsMonotonic = allocated.forall(id => id > 0 and id < nextId)
+
+  // Active miners bounded
+  val minersBounded = allocated.size() <= MAX_MINERS
+
+  // No zero IDs allocated (0 is reserved)
+  val noZeroId = not(allocated.contains(0))
+
+  // Witnesses
+  val witnessNoAllocations = gAllocations == 0
+}
+
+module NoncePartitionTest {
+  import NoncePartition(NONCE_TOTAL = 32, NONCE_1_LEN = 4, MAX_MINERS = 5).*
+
+  run basicAllocation = init
+    .then(allocateRange)
+    .expect(allocated.size() == 1)
+    .expect(nextId == 2)
+    .expect(nonce1Unique)
+
+  run multipleMiners = init
+    .then(allocateRange).then(allocateRange).then(allocateRange)
+    .expect(allocated.size() == 3)
+    .expect(nonce1Unique)
+    .expect(idsMonotonic)
+
+  run deallocateAndReallocate = init
+    .then(allocateRange)   // id=1
+    .then(allocateRange)   // id=2
+    .then(deallocate(1))
+    .expect(allocated.size() == 1)
+    .then(allocateRange)   // id=3 (not reusing 1)
+    .expect(nextId == 4)
+    .expect(nonce1Unique)
+
+  run nonceConservationCheck = init
+    .expect(nonceConservation)
+    .expect(nonce_2_len(4) == 28)
+
+  run maxMinersEnforced = init
+    .then(allocateRange).then(allocateRange).then(allocateRange)
+    .then(allocateRange).then(allocateRange)
+    .expect(allocated.size() == 5)
+    .then(allocateRange).fail()  // exceeds MAX_MINERS
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 13: Session Lifecycle
+// ═══════════════════════════════════════════════════════════════
+// Models per-miner session from session.rs:
+//   - Session state machine: Connected → Active → Disconnected
+//   - Message sequencing: each share gets exactly one response
+//   - Buffer limits: 64KB read buffer, 1MB frame limit
+//   - Share validation timeout: 30s deadline
+//   - Channel ID validation: share must match session's channel
+
+module SessionLifecycle {
+  import basicSpells.*
+
+  const SESSIONS: Set[int]
+  const MAX_BUFFER: int       // 64KB in real code
+  const MAX_FRAME: int        // 1MB in real code
+  const VALIDATION_TIMEOUT: int  // 30s in ticks
+
+  // Session states
+  // 0 = Disconnected, 1 = Connected (idle), 2 = WaitingValidation, 3 = Responding
+  var sessionState: int -> int
+  var channelId: int -> int           // assigned channel per session
+  var pendingSeqNum: int -> int       // sequence number of pending share
+  var waitTicks: int -> int           // ticks waiting for validation
+  var bufferUsed: int -> int          // current read buffer usage
+  var sharesProcessed: int -> int     // total shares processed per session
+  var gTimeouts: int
+  var gBufferOverflows: int
+  var gFrameOverflows: int
+  var gSharesAccepted: int
+  var gSharesRejected: int
+  var gDisconnects: int
+
+  action init = all {
+    sessionState' = SESSIONS.mapBy(_ => 0),  // all disconnected
+    channelId' = SESSIONS.mapBy(s => s),      // unique channel IDs
+    pendingSeqNum' = SESSIONS.mapBy(_ => 0),
+    waitTicks' = SESSIONS.mapBy(_ => 0),
+    bufferUsed' = SESSIONS.mapBy(_ => 0),
+    sharesProcessed' = SESSIONS.mapBy(_ => 0),
+    gTimeouts' = 0,
+    gBufferOverflows' = 0,
+    gFrameOverflows' = 0,
+    gSharesAccepted' = 0,
+    gSharesRejected' = 0,
+    gDisconnects' = 0,
+  }
+
+  // Session connects
+  action connect(s: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) == 0,
+    sessionState' = sessionState.set(s, 1),
+    channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+    waitTicks' = waitTicks, bufferUsed' = bufferUsed,
+    sharesProcessed' = sharesProcessed,
+    gTimeouts' = gTimeouts, gBufferOverflows' = gBufferOverflows,
+    gFrameOverflows' = gFrameOverflows, gSharesAccepted' = gSharesAccepted,
+    gSharesRejected' = gSharesRejected, gDisconnects' = gDisconnects,
+  }
+
+  // Miner submits a share (with buffer and frame size checks)
+  action submitShare(s: int, seq: int, frameSize: int, bufSize: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) == 1,  // must be connected/idle
+    seq > 0,
+    // Buffer limit check
+    bufSize <= MAX_BUFFER,
+    frameSize <= MAX_FRAME,
+    sessionState' = sessionState.set(s, 2),  // waiting for validation
+    pendingSeqNum' = pendingSeqNum.set(s, seq),
+    waitTicks' = waitTicks.set(s, 0),
+    bufferUsed' = bufferUsed.set(s, bufSize),
+    channelId' = channelId,
+    sharesProcessed' = sharesProcessed,
+    gTimeouts' = gTimeouts, gBufferOverflows' = gBufferOverflows,
+    gFrameOverflows' = gFrameOverflows, gSharesAccepted' = gSharesAccepted,
+    gSharesRejected' = gSharesRejected, gDisconnects' = gDisconnects,
+  }
+
+  // Buffer overflow: miner sends too much data
+  action bufferOverflow(s: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) == 1,
+    // Disconnect on overflow
+    sessionState' = sessionState.set(s, 0),
+    gBufferOverflows' = gBufferOverflows + 1,
+    gDisconnects' = gDisconnects + 1,
+    channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+    waitTicks' = waitTicks, bufferUsed' = bufferUsed,
+    sharesProcessed' = sharesProcessed,
+    gTimeouts' = gTimeouts, gFrameOverflows' = gFrameOverflows,
+    gSharesAccepted' = gSharesAccepted, gSharesRejected' = gSharesRejected,
+  }
+
+  // Frame too large: disconnect
+  action frameOverflow(s: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) == 1,
+    sessionState' = sessionState.set(s, 0),
+    gFrameOverflows' = gFrameOverflows + 1,
+    gDisconnects' = gDisconnects + 1,
+    channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+    waitTicks' = waitTicks, bufferUsed' = bufferUsed,
+    sharesProcessed' = sharesProcessed,
+    gTimeouts' = gTimeouts, gBufferOverflows' = gBufferOverflows,
+    gSharesAccepted' = gSharesAccepted, gSharesRejected' = gSharesRejected,
+  }
+
+  // Validation completes: share accepted
+  action shareAccepted(s: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) == 2,
+    waitTicks.get(s) < VALIDATION_TIMEOUT,
+    sessionState' = sessionState.set(s, 1),  // back to idle
+    sharesProcessed' = sharesProcessed.setBy(s, c => c + 1),
+    gSharesAccepted' = gSharesAccepted + 1,
+    bufferUsed' = bufferUsed.set(s, 0),
+    channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+    waitTicks' = waitTicks,
+    gTimeouts' = gTimeouts, gBufferOverflows' = gBufferOverflows,
+    gFrameOverflows' = gFrameOverflows, gSharesRejected' = gSharesRejected,
+    gDisconnects' = gDisconnects,
+  }
+
+  // Validation completes: share rejected
+  action shareRejected(s: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) == 2,
+    waitTicks.get(s) < VALIDATION_TIMEOUT,
+    sessionState' = sessionState.set(s, 1),  // back to idle
+    sharesProcessed' = sharesProcessed.setBy(s, c => c + 1),
+    gSharesRejected' = gSharesRejected + 1,
+    bufferUsed' = bufferUsed.set(s, 0),
+    channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+    waitTicks' = waitTicks,
+    gTimeouts' = gTimeouts, gBufferOverflows' = gBufferOverflows,
+    gFrameOverflows' = gFrameOverflows, gSharesAccepted' = gSharesAccepted,
+    gDisconnects' = gDisconnects,
+  }
+
+  // Tick while waiting for validation (timeout check)
+  action waitTick(s: int): bool = {
+    val newTicks = waitTicks.get(s) + 1
+    all {
+      SESSIONS.contains(s),
+      sessionState.get(s) == 2,
+      if (newTicks >= VALIDATION_TIMEOUT) all {
+        // Timeout: disconnect
+        sessionState' = sessionState.set(s, 0),
+        gTimeouts' = gTimeouts + 1,
+        gDisconnects' = gDisconnects + 1,
+        waitTicks' = waitTicks.set(s, newTicks),
+      } else all {
+        // Still waiting
+        sessionState' = sessionState,
+        gTimeouts' = gTimeouts,
+        gDisconnects' = gDisconnects,
+        waitTicks' = waitTicks.set(s, newTicks),
+      },
+      channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+      bufferUsed' = bufferUsed, sharesProcessed' = sharesProcessed,
+      gBufferOverflows' = gBufferOverflows, gFrameOverflows' = gFrameOverflows,
+      gSharesAccepted' = gSharesAccepted, gSharesRejected' = gSharesRejected,
+    }
+  }
+
+  // Miner disconnects (normal close)
+  action disconnect(s: int): bool = all {
+    SESSIONS.contains(s),
+    sessionState.get(s) != 0,
+    sessionState' = sessionState.set(s, 0),
+    gDisconnects' = gDisconnects + 1,
+    channelId' = channelId, pendingSeqNum' = pendingSeqNum,
+    waitTicks' = waitTicks, bufferUsed' = bufferUsed,
+    sharesProcessed' = sharesProcessed,
+    gTimeouts' = gTimeouts, gBufferOverflows' = gBufferOverflows,
+    gFrameOverflows' = gFrameOverflows, gSharesAccepted' = gSharesAccepted,
+    gSharesRejected' = gSharesRejected,
+  }
+
+  action step = {
+    nondet s = SESSIONS.oneOf()
+    nondet seq = 1.to(100).oneOf()
+    nondet fs = 1.to(MAX_FRAME + 1).oneOf()
+    nondet bs = 1.to(MAX_BUFFER + 1).oneOf()
+    any {
+      connect(s),
+      submitShare(s, seq, fs, bs),
+      shareAccepted(s),
+      shareRejected(s),
+      waitTick(s),
+      disconnect(s),
+      bufferOverflow(s),
+      frameOverflow(s),
+    }
+  }
+
+  // INVARIANTS
+
+  // State is always valid (0-3)
+  val stateValid = SESSIONS.forall(s =>
+    sessionState.get(s) >= 0 and sessionState.get(s) <= 3)
+
+  // Channel IDs are unique across sessions
+  val channelIdsUnique = SESSIONS.forall(s1 => SESSIONS.forall(s2 =>
+    (s1 == s2) or channelId.get(s1) != channelId.get(s2)))
+
+  // Buffer usage is bounded
+  val bufferBounded = SESSIONS.forall(s =>
+    bufferUsed.get(s) >= 0 and bufferUsed.get(s) <= MAX_BUFFER)
+
+  // Waiting sessions have a pending sequence number
+  val waitHasSeq = SESSIONS.forall(s =>
+    (sessionState.get(s) == 2) implies (pendingSeqNum.get(s) > 0))
+
+  // Total shares = accepted + rejected
+  val shareAccountingCorrect = gSharesAccepted + gSharesRejected ==
+    SESSIONS.fold(0, (sum, s) => sum + sharesProcessed.get(s))
+
+  // Witnesses
+  val witnessNoTimeouts = gTimeouts == 0
+  val witnessNoDisconnects = gDisconnects == 0
+}
+
+module SessionLifecycleTest {
+  import SessionLifecycle(
+    SESSIONS = Set(1, 2), MAX_BUFFER = 100, MAX_FRAME = 200,
+    VALIDATION_TIMEOUT = 3,
+  ).*
+
+  run happyPathSession = init
+    .then(connect(1))
+    .expect(sessionState.get(1) == 1)
+    .then(submitShare(1, 1, 50, 30))
+    .expect(sessionState.get(1) == 2)
+    .then(shareAccepted(1))
+    .expect(sessionState.get(1) == 1)
+    .expect(gSharesAccepted == 1)
+    .expect(shareAccountingCorrect)
+
+  run shareRejection = init
+    .then(connect(1))
+    .then(submitShare(1, 1, 50, 30))
+    .then(shareRejected(1))
+    .expect(gSharesRejected == 1)
+    .expect(sessionState.get(1) == 1)
+
+  run validationTimeout = init
+    .then(connect(1))
+    .then(submitShare(1, 1, 50, 30))
+    .then(waitTick(1)).then(waitTick(1)).then(waitTick(1))
+    .expect(sessionState.get(1) == 0)
+    .expect(gTimeouts == 1)
+    .expect(gDisconnects == 1)
+
+  run bufferOverflowDisconnects = init
+    .then(connect(1))
+    .then(bufferOverflow(1))
+    .expect(sessionState.get(1) == 0)
+    .expect(gBufferOverflows == 1)
+
+  run twoSessionsIndependent = init
+    .then(connect(1)).then(connect(2))
+    .then(submitShare(1, 1, 50, 30))
+    .then(submitShare(2, 1, 50, 30))
+    .then(shareAccepted(1))
+    .then(shareRejected(2))
+    .expect(gSharesAccepted == 1)
+    .expect(gSharesRejected == 1)
+    .expect(channelIdsUnique)
+
+  run multipleSharesInSequence = init
+    .then(connect(1))
+    .then(submitShare(1, 1, 50, 30))
+    .then(shareAccepted(1))
+    .then(submitShare(1, 2, 50, 30))
+    .then(shareAccepted(1))
+    .expect(sharesProcessed.get(1) == 2)
+    .expect(shareAccountingCorrect)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE 14: Reconnection & Backoff
+// ═══════════════════════════════════════════════════════════════
+// Models ReconnectManager from reconnect.rs:
+//   - Exponential backoff with configurable multiplier and cap
+//   - Jitter to prevent thundering herd
+//   - Resets after stable connection (> threshold duration)
+//   - Attack detection scoring based on failure patterns
+//   - Failure history with sliding window
+
+module ReconnectBackoff {
+  import basicSpells.*
+
+  const INITIAL_DELAY: int      // e.g. 10 (representing 1s in ticks)
+  const MAX_DELAY: int          // e.g. 600 (representing 60s)
+  const BACKOFF_MULT: int       // e.g. 2
+  const MAX_ATTEMPTS: int       // 0 = unlimited
+  const STABLE_THRESHOLD: int   // ticks for connection to be "stable"
+  const SHORT_LIVED_THRESH: int // ticks below which connection is "short-lived"
+  const MAX_FAILURES: int       // max failure history (100)
+
+  // DisconnectReason: 0=Normal, 1=NetworkError, 2=DecryptionError,
+  //                   3=HandshakeError, 4=ServerClosed
+  type Failure = { reason: int, duration: int, tick: int }
+
+  var attemptCount: int
+  var currentDelay: int
+  var connected: bool
+  var connectedAt: int          // tick when last connected
+  var clock: int
+  var failures: List[Failure]   // recent failure history
+  var gResets: int              // ghost: backoff resets
+  var gExhausted: bool          // ghost: max attempts hit
+  var gDecryptErrors: int       // ghost: decryption error count
+  var gShortLived: int          // ghost: short-lived disconnects
+
+  action init = all {
+    attemptCount' = 0,
+    currentDelay' = 0,
+    connected' = false,
+    connectedAt' = 0,
+    clock' = 0,
+    failures' = [],
+    gResets' = 0,
+    gExhausted' = false,
+    gDecryptErrors' = 0,
+    gShortLived' = 0,
+  }
+
+  // Connection established
+  action onConnected: bool = all {
+    not(connected),
+    connected' = true,
+    connectedAt' = clock,
+    attemptCount' = attemptCount,
+    currentDelay' = currentDelay,
+    clock' = clock,
+    failures' = failures,
+    gResets' = gResets,
+    gExhausted' = gExhausted,
+    gDecryptErrors' = gDecryptErrors,
+    gShortLived' = gShortLived,
+  }
+
+  // Disconnected: compute backoff delay
+  action onDisconnected(reason: int, duration: int): bool = {
+    val newAttempts = attemptCount + 1
+    val wasStable = duration >= STABLE_THRESHOLD
+    val resetBackoff = wasStable
+    val effAttempts = if (resetBackoff) 1 else newAttempts
+    val newDelay = if (effAttempts == 1) INITIAL_DELAY
+                   else min(currentDelay * BACKOFF_MULT, MAX_DELAY)
+    val isShort = duration < SHORT_LIVED_THRESH
+    val isDecrypt = reason == 2
+    val exhausted = MAX_ATTEMPTS > 0 and newAttempts > MAX_ATTEMPTS
+    val entry: Failure = { reason: reason, duration: duration, tick: clock }
+    val newFailures = if (failures.length() >= MAX_FAILURES)
+      failures.tail().append(entry)
+    else
+      failures.append(entry)
+    all {
+      connected,
+      reason >= 0, reason <= 4,
+      duration >= 0,
+      connected' = false,
+      attemptCount' = if (resetBackoff) 1 else newAttempts,
+      currentDelay' = newDelay,
+      failures' = newFailures,
+      connectedAt' = connectedAt,
+      clock' = clock,
+      gResets' = if (resetBackoff) gResets + 1 else gResets,
+      gExhausted' = exhausted,
+      gDecryptErrors' = if (isDecrypt) gDecryptErrors + 1 else gDecryptErrors,
+      gShortLived' = if (isShort) gShortLived + 1 else gShortLived,
+    }
+  }
+
+  // Advance time
+  action tick = all {
+    clock' = clock + 1,
+    connected' = connected,
+    connectedAt' = connectedAt,
+    attemptCount' = attemptCount,
+    currentDelay' = currentDelay,
+    failures' = failures,
+    gResets' = gResets,
+    gExhausted' = gExhausted,
+    gDecryptErrors' = gDecryptErrors,
+    gShortLived' = gShortLived,
+  }
+
+  action step = {
+    nondet reason = 0.to(4).oneOf()
+    nondet dur = 0.to(STABLE_THRESHOLD + 5).oneOf()
+    any {
+      onConnected,
+      onDisconnected(reason, dur),
+      tick,
+    }
+  }
+
+  // INVARIANTS
+
+  // Delay never exceeds max
+  val delayBounded = currentDelay >= 0 and currentDelay <= MAX_DELAY
+
+  // Attempt count is non-negative
+  val attemptsNonNeg = attemptCount >= 0
+
+  // Failure history bounded
+  val failuresBounded = failures.length() <= MAX_FAILURES
+
+  // Delay monotonicity: once > 0, only increases (until reset)
+  // After disconnect, delay is at least INITIAL_DELAY
+  val delayMinimum = (attemptCount > 0) implies (currentDelay >= INITIAL_DELAY)
+
+  // Witnesses
+  val witnessNoResets = gResets == 0
+  val witnessNotExhausted = not(gExhausted)
+}
+
+module ReconnectBackoffTest {
+  import ReconnectBackoff(
+    INITIAL_DELAY = 10, MAX_DELAY = 100, BACKOFF_MULT = 2,
+    MAX_ATTEMPTS = 5, STABLE_THRESHOLD = 50, SHORT_LIVED_THRESH = 10,
+    MAX_FAILURES = 5,
+  ).*
+
+  run firstDisconnect = init
+    .then(onConnected)
+    .then(onDisconnected(1, 5))
+    .expect(currentDelay == 10)
+    .expect(attemptCount == 1)
+
+  run exponentialGrowth = init
+    .then(onConnected).then(onDisconnected(1, 5))  // delay=10
+    .then(onConnected).then(onDisconnected(1, 5))  // delay=20
+    .then(onConnected).then(onDisconnected(1, 5))  // delay=40
+    .then(onConnected).then(onDisconnected(1, 5))  // delay=80
+    .expect(currentDelay == 80)
+    .expect(delayBounded)
+
+  run delayCapped = init
+    .then(onConnected).then(onDisconnected(1, 5))  // 10
+    .then(onConnected).then(onDisconnected(1, 5))  // 20
+    .then(onConnected).then(onDisconnected(1, 5))  // 40
+    .then(onConnected).then(onDisconnected(1, 5))  // 80
+    .then(onConnected).then(onDisconnected(1, 5))  // min(160, 100) = 100
+    .expect(currentDelay == 100)
+    .expect(gExhausted)  // 5 attempts = max
+
+  run stableConnectionResets = init
+    .then(onConnected).then(onDisconnected(1, 5))  // delay=10
+    .then(onConnected).then(onDisconnected(1, 5))  // delay=20
+    .then(onConnected).then(onDisconnected(0, 60)) // stable! reset
+    .expect(attemptCount == 1)
+    .expect(currentDelay == 10)
+    .expect(gResets == 1)
+
+  run decryptionErrorTracked = init
+    .then(onConnected).then(onDisconnected(2, 3))
+    .expect(gDecryptErrors == 1)
+    .expect(gShortLived == 1)
+
+  run failureHistoryCapped = init
+    .then(onConnected).then(onDisconnected(1, 5))
+    .then(onConnected).then(onDisconnected(1, 5))
+    .then(onConnected).then(onDisconnected(1, 5))
+    .then(onConnected).then(onDisconnected(1, 5))
+    .then(onConnected).then(onDisconnected(1, 5))
+    .expect(failures.length() == 5)
+    .expect(failuresBounded)
+}

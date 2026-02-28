@@ -131,7 +131,9 @@ pub fn target_to_difficulty(target: &Target) -> f64 {
 ///
 /// Target = max_target / difficulty
 pub fn difficulty_to_target_with_max(difficulty: f64, max: &Target) -> Target {
-    if difficulty <= 0.0 {
+    // Guard against NaN (bypasses <= 0.0 since NaN comparisons are always false)
+    // and Infinity (max_val / Infinity = 0.0, producing all-zeros target)
+    if !difficulty.is_finite() || difficulty <= 0.0 {
         return *max;
     }
 
@@ -200,5 +202,34 @@ mod tests {
             let ratio = recovered / diff;
             assert!(ratio > 0.99 && ratio < 1.01, "diff={}, recovered={}", diff, recovered);
         }
+    }
+
+    #[test]
+    fn test_difficulty_to_target_nan_infinity() {
+        let max = Target::max_mainnet();
+
+        // NaN should return max target (not corrupt to all-zeros)
+        let nan_target = difficulty_to_target_with_max(f64::NAN, &max);
+        assert_eq!(nan_target, max);
+
+        // +Infinity should return max target
+        let inf_target = difficulty_to_target_with_max(f64::INFINITY, &max);
+        assert_eq!(inf_target, max);
+
+        // -Infinity should return max target
+        let neg_inf_target = difficulty_to_target_with_max(f64::NEG_INFINITY, &max);
+        assert_eq!(neg_inf_target, max);
+
+        // Negative values should return max target
+        let neg_target = difficulty_to_target_with_max(-1.0, &max);
+        assert_eq!(neg_target, max);
+
+        // Zero should return max target
+        let zero_target = difficulty_to_target_with_max(0.0, &max);
+        assert_eq!(zero_target, max);
+
+        // Valid positive difficulty should NOT return max target
+        let valid_target = difficulty_to_target_with_max(100.0, &max);
+        assert_ne!(valid_target, max);
     }
 }

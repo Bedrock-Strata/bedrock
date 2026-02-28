@@ -140,12 +140,18 @@ impl VardiffController {
             self.config.max_difficulty,
         );
 
-        // Apply smoothing to avoid large jumps
-        let smoothed = self.current_difficulty * 0.5 + new_difficulty * 0.5;
-        let final_difficulty = smoothed.clamp(
-            self.config.min_difficulty,
-            self.config.max_difficulty,
-        );
+        // Apply smoothing to avoid large jumps, but only when there IS share
+        // data to smooth against. With zero shares (ratio == 0), take the full
+        // cut immediately: smoothing on top of the halving only produces a 25%
+        // drop per interval, making offline miners take 5+ intervals to converge.
+        let final_difficulty = if ratio > 0.0 {
+            (self.current_difficulty * 0.5 + new_difficulty * 0.5).clamp(
+                self.config.min_difficulty,
+                self.config.max_difficulty,
+            )
+        } else {
+            new_difficulty
+        };
 
         if (final_difficulty - self.current_difficulty).abs() > 0.01 {
             info!(
@@ -163,9 +169,10 @@ impl VardiffController {
 
     /// Reset the measurement window
     fn reset_window(&mut self) {
+        let now = Instant::now();
         self.shares_since_retarget = 0;
-        self.last_retarget = Instant::now();
-        self.window_start = Instant::now();
+        self.last_retarget = now;
+        self.window_start = now;
     }
 
     /// Get statistics about current window
@@ -234,5 +241,34 @@ mod tests {
         let target = controller.current_target();
         // Target should be non-zero
         assert!(target.0.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_zero_shares_full_difficulty_cut() {
+        // Regression: smoothing on top of the zero-share halving produced only
+        // a 25% drop (current*0.75) instead of the intended 50% (current*0.5).
+        let config = VardiffConfig {
+            initial_difficulty: 100.0,
+            min_difficulty: 1.0,
+            max_difficulty: 1000.0,
+            retarget_interval: Duration::from_millis(1),
+            target_shares_per_minute: 5.0,
+            variance_tolerance: 0.25,
+        };
+        let mut controller = VardiffController::new(config);
+        assert_eq!(controller.current_difficulty(), 100.0);
+
+        // Wait for retarget interval to elapse with zero shares
+        std::thread::sleep(Duration::from_millis(5));
+        let new_diff = controller.maybe_retarget();
+
+        // With zero shares, difficulty should drop by 50% (to 50.0), not 25%
+        assert!(new_diff.is_some(), "retarget should trigger");
+        let diff = new_diff.unwrap();
+        assert!(
+            (diff - 50.0).abs() < 1.0,
+            "Expected ~50.0 after zero-share retarget, got {:.2}",
+            diff
+        );
     }
 }

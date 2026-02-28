@@ -81,16 +81,42 @@ impl ShareProcessor {
             });
         }
 
-        // 2. Build full nonce and header
+        // 2. Validate share timestamp is within consensus-acceptable range.
+        //    Miners can roll ntime forward but not too far. A block-qualifying
+        //    share with an invalid timestamp gets rejected by Zebra, wasting
+        //    the block find.
+        const MAX_TIME_FORWARD: u32 = 7200; // 2 hours, matches Zcash/Bitcoin consensus
+        const MAX_TIME_BACKWARD: u32 = 60; // 1 minute tolerance for clock skew
+        if share.time < job.time.saturating_sub(MAX_TIME_BACKWARD)
+            || share.time > job.time.saturating_add(MAX_TIME_FORWARD)
+        {
+            debug!(
+                "Share timestamp {} out of range (job time: {}, allowed: {}-{})",
+                share.time,
+                job.time,
+                job.time.saturating_sub(MAX_TIME_BACKWARD),
+                job.time.saturating_add(MAX_TIME_FORWARD),
+            );
+            return Ok(ShareValidationResult {
+                accepted: false,
+                result: ShareResult::Rejected(RejectReason::Other(
+                    "timestamp out of range".to_string(),
+                )),
+                difficulty: None,
+                is_block: false,
+            });
+        }
+
+        // 3. Build full nonce and header
         let full_nonce = job.build_nonce(&share.nonce_2).ok_or_else(|| {
             PoolError::InvalidMessage("Invalid nonce_2 length".to_string())
         })?;
 
         let mut header = job.build_header(&full_nonce);
-        // Update time if miner changed it
+        // Update time if miner changed it (already validated above)
         header[100..104].copy_from_slice(&share.time.to_le_bytes());
 
-        // 3. Verify Equihash solution AND check share meets pool target.
+        // 4. Verify Equihash solution AND check share meets pool target.
         //    verify_share calls verify_solution internally, so we only call it
         //    once to avoid the expensive (~144 MB) duplicate Equihash verification.
         let share_target = &job.target;
@@ -184,5 +210,74 @@ mod tests {
         let high_hash = [0xff; 32];
         let low_target = [0x00; 32];
         assert!(!processor.meets_target(&high_hash, &low_target));
+    }
+
+    #[test]
+    fn test_share_time_validation() {
+        use crate::duplicate::InMemoryDuplicateDetector;
+        let processor = ShareProcessor::new();
+        let detector = InMemoryDuplicateDetector::new();
+        let block_target = [0xff; 32];
+        let job_time: u32 = 1_700_000_000;
+
+        let job = NewEquihashJob {
+            channel_id: 1,
+            job_id: 1,
+            future_job: false,
+            version: 5,
+            prev_hash: [0; 32],
+            merkle_root: [0; 32],
+            block_commitments: [0; 32],
+            nonce_1: vec![0; 4],
+            nonce_2_len: 28,
+            time: job_time,
+            bits: 0x2007ffff,
+            target: [0xff; 32],
+            clean_jobs: false,
+        };
+
+        // Share with timestamp too far in the future (>2 hours)
+        let future_share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 1,
+            job_id: 1,
+            nonce_2: vec![0; 28],
+            time: job_time + 7201, // 2 hours + 1 second
+            solution: [0; 1344],
+        };
+        let result = processor.validate_share_with_job(&future_share, &job, &detector, &block_target).unwrap();
+        assert!(!result.accepted, "Share with timestamp >2h in future should be rejected");
+
+        // Share with timestamp too far in the past (>60s before job)
+        let past_share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 2,
+            job_id: 1,
+            nonce_2: vec![0; 28],
+            time: job_time - 61,
+            solution: [0; 1344],
+        };
+        let result = processor.validate_share_with_job(&past_share, &job, &detector, &block_target).unwrap();
+        assert!(!result.accepted, "Share with timestamp >60s before job time should be rejected");
+
+        // Share with valid timestamp (same as job time) should pass time check
+        // (it will fail Equihash validation, but that's expected - the point is
+        // it doesn't get rejected for timestamp)
+        let valid_time_share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 3,
+            job_id: 1,
+            nonce_2: vec![0; 28],
+            time: job_time,
+            solution: [0; 1344],
+        };
+        let result = processor.validate_share_with_job(&valid_time_share, &job, &detector, &block_target).unwrap();
+        // Should NOT be rejected for timestamp - will be rejected for invalid solution instead
+        match result.result {
+            ShareResult::Rejected(RejectReason::Other(_)) => {
+                panic!("Valid timestamp should not trigger timestamp rejection");
+            }
+            _ => {} // Any other result (accepted or rejected for solution) is fine
+        }
     }
 }

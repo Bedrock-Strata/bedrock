@@ -566,26 +566,32 @@ impl JdClient {
     /// Cache is automatically pruned when limits are exceeded.
     pub async fn cache_transactions(&self, transactions: impl IntoIterator<Item = ([u8; 32], Vec<u8>)>) {
         let mut cache = self.tx_cache.write().await;
-
-        // Pre-check cache size
-        if cache.len() >= Self::MAX_TX_CACHE_ENTRIES {
-            tracing::warn!("Transaction cache entry limit reached, evicting oldest half");
-            let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
-            for key in to_remove {
-                cache.remove(&key);
-            }
-        }
-
-        let total_bytes: usize = cache.values().map(|v| v.len()).sum();
-        if total_bytes > Self::MAX_TX_CACHE_BYTES {
-            tracing::warn!("Transaction cache byte limit reached, evicting oldest half");
-            let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
-            for key in to_remove {
-                cache.remove(&key);
-            }
-        }
+        let mut total_bytes: usize = cache.values().map(|v| v.len()).sum();
 
         for (txid, data) in transactions {
+            // Check entry count limit before each insert
+            if cache.len() >= Self::MAX_TX_CACHE_ENTRIES {
+                tracing::warn!("Transaction cache entry limit reached, evicting oldest half");
+                let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+                for key in &to_remove {
+                    if let Some(removed) = cache.remove(key) {
+                        total_bytes = total_bytes.saturating_sub(removed.len());
+                    }
+                }
+            }
+
+            // Check byte size limit before each insert
+            if total_bytes + data.len() > Self::MAX_TX_CACHE_BYTES {
+                tracing::warn!("Transaction cache byte limit reached, evicting oldest half");
+                let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+                for key in &to_remove {
+                    if let Some(removed) = cache.remove(key) {
+                        total_bytes = total_bytes.saturating_sub(removed.len());
+                    }
+                }
+            }
+
+            total_bytes += data.len();
             cache.insert(txid, data);
         }
     }

@@ -131,7 +131,11 @@ impl PayoutTracker {
     /// Number of active miners (submitted share in window)
     pub fn active_miner_count(&self) -> usize {
         let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());
-        let cutoff = Instant::now() - self.window_duration;
+        // Use checked_sub to avoid panic if window_duration > uptime
+        let cutoff = match Instant::now().checked_sub(self.window_duration) {
+            Some(t) => t,
+            None => return miners.values().filter(|s| s.last_share.is_some()).count(),
+        };
         miners
             .values()
             .filter(|s| s.last_share.map(|t| t > cutoff).unwrap_or(false))
@@ -149,8 +153,12 @@ impl PayoutTracker {
     /// Prevents unbounded growth of the miners HashMap when miners
     /// disconnect and reconnect with new channel IDs.
     pub fn cleanup_stale_miners(&self, max_idle: Duration) {
+        // Use checked_sub to avoid panic if max_idle > uptime
+        let cutoff = match Instant::now().checked_sub(max_idle) {
+            Some(t) => t,
+            None => return, // All miners are within window, nothing to clean
+        };
         let mut miners = self.miners.write().unwrap_or_else(|e| e.into_inner());
-        let cutoff = Instant::now() - max_idle;
         let before = miners.len();
         miners.retain(|_, stats| {
             stats.last_share.map(|t| t > cutoff).unwrap_or(false)

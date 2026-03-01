@@ -245,7 +245,9 @@ fn parse_coinbase_outputs(tx: &[u8]) -> Result<CoinbaseOutputs> {
     let vout_count_offset = cursor;
     let vout_count = read_compact_size(tx, &mut cursor)?;
 
-    let mut outputs = Vec::with_capacity(vout_count as usize);
+    // Cap pre-allocation to remaining data length to prevent OOM from malicious compact_size
+    let max_outputs = (tx.len() - cursor) / 9; // minimum output is 8 (value) + 1 (script_len)
+    let mut outputs = Vec::with_capacity((vout_count as usize).min(max_outputs));
     for _ in 0..vout_count {
         if cursor + 8 > tx.len() {
             return Err(JdClientError::Protocol("coinbase output value out of bounds".to_string()));

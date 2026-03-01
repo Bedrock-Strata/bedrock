@@ -194,20 +194,35 @@ impl JdServer {
         }
 
         // 3. Check prev_hash matches current (stale detection)
+        //    Fail closed: reject if we haven't received any template yet
         let current_prev_hash = self.current_prev_hash.read().await;
-        if let Some(expected_prev_hash) = *current_prev_hash {
-            if request.prev_hash != expected_prev_hash {
+        match *current_prev_hash {
+            Some(expected_prev_hash) => {
+                if request.prev_hash != expected_prev_hash {
+                    warn!(
+                        request_id = request.request_id,
+                        expected = ?hex::encode(expected_prev_hash),
+                        got = ?hex::encode(request.prev_hash),
+                        "Job declaration rejected: stale prev_hash"
+                    );
+                    return Err(SetCustomMiningJobError::new(
+                        request.channel_id,
+                        request.request_id,
+                        SetCustomMiningJobErrorCode::StalePrevHash,
+                        "Previous block hash does not match current chain tip",
+                    ));
+                }
+            }
+            None => {
                 warn!(
                     request_id = request.request_id,
-                    expected = ?hex::encode(expected_prev_hash),
-                    got = ?hex::encode(request.prev_hash),
-                    "Job declaration rejected: stale prev_hash"
+                    "Job declaration rejected: no template received yet"
                 );
                 return Err(SetCustomMiningJobError::new(
                     request.channel_id,
                     request.request_id,
                     SetCustomMiningJobErrorCode::StalePrevHash,
-                    "Previous block hash does not match current chain tip",
+                    "Server has not received a block template yet",
                 ));
             }
         }
@@ -384,20 +399,35 @@ impl JdServer {
         }
 
         // 4. Check prev_hash matches current (stale detection)
+        //    Fail closed: reject if we haven't received any template yet
         let current_prev_hash = self.current_prev_hash.read().await;
-        if let Some(expected_prev_hash) = *current_prev_hash {
-            if request.prev_hash != expected_prev_hash {
+        match *current_prev_hash {
+            Some(expected_prev_hash) => {
+                if request.prev_hash != expected_prev_hash {
+                    warn!(
+                        request_id = request.request_id,
+                        expected = ?hex::encode(expected_prev_hash),
+                        got = ?hex::encode(request.prev_hash),
+                        "Full template job rejected: stale prev_hash"
+                    );
+                    return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
+                        request.channel_id,
+                        request.request_id,
+                        SetFullTemplateJobErrorCode::StalePrevHash,
+                        "Previous block hash does not match current chain tip",
+                    )));
+                }
+            }
+            None => {
                 warn!(
                     request_id = request.request_id,
-                    expected = ?hex::encode(expected_prev_hash),
-                    got = ?hex::encode(request.prev_hash),
-                    "Full template job rejected: stale prev_hash"
+                    "Full template job rejected: no template received yet"
                 );
                 return Err(FullTemplateJobResponse::Error(SetFullTemplateJobError::new(
                     request.channel_id,
                     request.request_id,
                     SetFullTemplateJobErrorCode::StalePrevHash,
-                    "Previous block hash does not match current chain tip",
+                    "Server has not received a block template yet",
                 )));
             }
         }

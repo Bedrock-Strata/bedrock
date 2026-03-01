@@ -143,7 +143,7 @@ impl SimulatedNetwork {
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
 
         let mut rng = self.rng.lock().unwrap();
-        let roll: f64 = rng.gen();
+        let roll: f64 = rng.r#gen();
 
         if roll < self.conditions.packet_loss {
             self.packets_lost.fetch_add(1, Ordering::Relaxed);

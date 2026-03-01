@@ -105,6 +105,12 @@ fn build_header(template: &BlockTemplate) -> Result<Vec<u8>, CompactBlockError> 
     header.extend_from_slice(&reserved);
 
     // Time (4 bytes, little-endian)
+    if template.cur_time > u32::MAX as u64 {
+        return Err(CompactBlockError::InvalidLength(format!(
+            "timestamp {} exceeds u32::MAX",
+            template.cur_time
+        )));
+    }
     header.extend_from_slice(&(template.cur_time as u32).to_le_bytes());
 
     // Bits (4 bytes)

@@ -3710,7 +3710,6 @@ dependencies = [
  "bedrock-forge",
  "bedrock-noise",
  "bedrock-strata",
- "blake2b_simd",
  "byteorder",
  "hex",
  "rand 0.8.5",

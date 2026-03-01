@@ -465,7 +465,7 @@ impl ConnectionTracker {
             .count();
         let avg_duration = if total > 0 {
             let sum: Duration = history.recent_durations.iter().map(|r| r.duration).sum();
-            sum / total as u32
+            sum / u32::try_from(total).unwrap_or(u32::MAX)
         } else {
             Duration::ZERO
         };

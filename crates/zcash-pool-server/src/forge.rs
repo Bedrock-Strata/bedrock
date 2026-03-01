@@ -180,14 +180,17 @@ impl ForgeRelay {
         ))
     }
 
-    /// Compute BLAKE2b-256 header hash with Zcash personalization
+    /// Compute double-SHA256 header hash, matching bedrock-forge library convention.
+    ///
+    /// This MUST match `CompactBlock::header_hash()`, `CompactBlockBuilder::compute_header_hash()`,
+    /// and `RelayClient::compute_block_hash()` so that short IDs are consistent between
+    /// sender and receiver during compact block reconstruction.
     fn compute_header_hash(&self, header: &[u8]) -> [u8; 32] {
-        let hash = blake2b_simd::Params::new()
-            .hash_length(32)
-            .personal(b"ZcashBlockHash\0\0")
-            .hash(header);
+        use sha2::{Digest, Sha256};
+        let first = Sha256::digest(header);
+        let second = Sha256::digest(first);
         let mut result = [0u8; 32];
-        result.copy_from_slice(hash.as_bytes());
+        result.copy_from_slice(&second);
         result
     }
 }

@@ -21,7 +21,6 @@ zcash-jd-server = { path = "../zcash-jd-server" }
 bedrock-noise = { path = "../bedrock-noise" }
 bedrock-strata = { path = "../bedrock-strata" }
 bedrock-forge = { path = "../bedrock-forge", optional = true }
-blake2b_simd.workspace = true
 byteorder.workspace = true
 hex.workspace = true
 rand = "0.8"

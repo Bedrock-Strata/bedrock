@@ -855,14 +855,13 @@ impl PoolServer {
         // Get block target
         let block_target = *self.current_block_target.read().await;
 
-        // Grab the job without holding the lock during validation
+        // Grab the job without holding the lock during validation.
+        // Use is_job_active() which checks BOTH the active flag AND the TTL,
+        // matching the Quint spec's job expiry model.
         let job = {
             let channels = self.channels.read().await;
             let channel = channels.get(&channel_id).ok_or(PoolError::UnknownChannel(channel_id))?;
-            let channel_job = channel
-                .get_job(share.job_id)
-                .ok_or(PoolError::UnknownJob(share.job_id))?;
-            if !channel_job.active {
+            if !channel.is_job_active(share.job_id) {
                 return response_tx
                     .send(ShareResult::Rejected(
                         zcash_mining_protocol::messages::RejectReason::StaleJob,
@@ -870,7 +869,9 @@ impl PoolServer {
                     .map_err(|_| PoolError::ChannelSend)
                     .map(|_| ());
             }
-            channel_job.job.clone()
+            channel.get_job(share.job_id)
+                .ok_or(PoolError::UnknownJob(share.job_id))?
+                .job.clone()
         };
 
         // Validate share without holding the channel lock
@@ -889,17 +890,28 @@ impl PoolServer {
                 let is_block = validation.is_block;
                 let mut channels = self.channels.write().await;
                 if let Some(channel) = channels.get_mut(&channel_id) {
-                    let new_target = if channel.record_share().is_some() {
-                        Some(channel.current_target())
+                    // Re-check job is still active after regaining the lock.
+                    // Between the read at line ~860 and this write lock, a new block
+                    // could have deactivated the job via broadcast_jobs(clean=true).
+                    // Without this re-check, shares for stale jobs would be accepted
+                    // and paid — the TOCTOU race modeled by ConcurrentShareValidation
+                    // in the Quint spec.
+                    if !channel.is_job_active(share.job_id) {
+                        debug!("Job {} became stale during validation for channel {}", share.job_id, channel_id);
+                        (None, None)
                     } else {
-                        None
-                    };
-                    // Record payout inside same lock scope
-                    if let Some(diff) = difficulty {
-                        let miner_id: MinerId = format!("channel_{}", channel_id);
-                        self.payout_tracker.record_share(&miner_id, diff);
+                        let new_target = if channel.record_share().is_some() {
+                            Some(channel.current_target())
+                        } else {
+                            None
+                        };
+                        // Record payout inside same lock scope
+                        if let Some(diff) = difficulty {
+                            let miner_id: MinerId = format!("channel_{}", channel_id);
+                            self.payout_tracker.record_share(&miner_id, diff);
+                        }
+                        (new_target, Some((difficulty, is_block)))
                     }
-                    (new_target, Some((difficulty, is_block)))
                 } else {
                     warn!("Channel {} removed during share validation", channel_id);
                     (None, None)

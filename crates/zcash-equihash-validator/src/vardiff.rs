@@ -38,6 +38,56 @@ impl Default for VardiffConfig {
     }
 }
 
+impl VardiffConfig {
+    /// Validate config, clamping invalid values to safe defaults.
+    ///
+    /// Prevents the division-by-zero bugs identified by the Quint spec's
+    /// VardiffDivZero module: zero target_shares_per_minute causes Infinity,
+    /// zero retarget_interval causes NaN.
+    pub fn validated(mut self) -> Self {
+        if !self.target_shares_per_minute.is_finite() || self.target_shares_per_minute <= 0.0 {
+            tracing::warn!(
+                "Invalid target_shares_per_minute {}, using default 5.0",
+                self.target_shares_per_minute
+            );
+            self.target_shares_per_minute = 5.0;
+        }
+        if self.retarget_interval.is_zero() {
+            tracing::warn!("Zero retarget_interval, using default 60s");
+            self.retarget_interval = Duration::from_secs(60);
+        }
+        if !self.min_difficulty.is_finite() || self.min_difficulty <= 0.0 {
+            tracing::warn!(
+                "Invalid min_difficulty {}, using default 1.0",
+                self.min_difficulty
+            );
+            self.min_difficulty = 1.0;
+        }
+        if !self.max_difficulty.is_finite() || self.max_difficulty <= 0.0 {
+            tracing::warn!(
+                "Invalid max_difficulty {}, using default 1e9",
+                self.max_difficulty
+            );
+            self.max_difficulty = 1_000_000_000.0;
+        }
+        if self.min_difficulty > self.max_difficulty {
+            tracing::warn!(
+                "min_difficulty {} > max_difficulty {}, swapping",
+                self.min_difficulty, self.max_difficulty
+            );
+            std::mem::swap(&mut self.min_difficulty, &mut self.max_difficulty);
+        }
+        if !self.variance_tolerance.is_finite() || self.variance_tolerance <= 0.0 || self.variance_tolerance >= 1.0 {
+            tracing::warn!(
+                "Invalid variance_tolerance {}, using default 0.25",
+                self.variance_tolerance
+            );
+            self.variance_tolerance = 0.25;
+        }
+        self
+    }
+}
+
 /// Per-miner vardiff state
 #[derive(Debug)]
 pub struct VardiffController {
@@ -49,8 +99,11 @@ pub struct VardiffController {
 }
 
 impl VardiffController {
-    /// Create a new vardiff controller
+    /// Create a new vardiff controller.
+    ///
+    /// Validates config to prevent division-by-zero and NaN/Infinity propagation.
     pub fn new(config: VardiffConfig) -> Self {
+        let config = config.validated();
         let now = Instant::now();
         let initial = config.initial_difficulty.clamp(
             config.min_difficulty,
@@ -241,6 +294,55 @@ mod tests {
         let target = controller.current_target();
         // Target should be non-zero
         assert!(target.0.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_config_validation_zero_target_spm() {
+        // Quint VardiffDivZero module: TARGET_SPM=0 causes division by zero
+        let config = VardiffConfig {
+            target_shares_per_minute: 0.0,
+            ..Default::default()
+        };
+        let validated = config.validated();
+        assert!(validated.target_shares_per_minute > 0.0);
+    }
+
+    #[test]
+    fn test_config_validation_zero_retarget_interval() {
+        // Quint VardiffDivZero module: RETARGET_INT=0 causes NaN (0/0)
+        let config = VardiffConfig {
+            retarget_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let validated = config.validated();
+        assert!(!validated.retarget_interval.is_zero());
+    }
+
+    #[test]
+    fn test_config_validation_nan_values() {
+        let config = VardiffConfig {
+            target_shares_per_minute: f64::NAN,
+            min_difficulty: f64::INFINITY,
+            max_difficulty: f64::NEG_INFINITY,
+            variance_tolerance: f64::NAN,
+            ..Default::default()
+        };
+        let validated = config.validated();
+        assert!(validated.target_shares_per_minute.is_finite() && validated.target_shares_per_minute > 0.0);
+        assert!(validated.min_difficulty.is_finite() && validated.min_difficulty > 0.0);
+        assert!(validated.max_difficulty.is_finite() && validated.max_difficulty > 0.0);
+        assert!(validated.variance_tolerance.is_finite() && validated.variance_tolerance > 0.0);
+    }
+
+    #[test]
+    fn test_config_validation_swapped_min_max() {
+        let config = VardiffConfig {
+            min_difficulty: 1000.0,
+            max_difficulty: 1.0,
+            ..Default::default()
+        };
+        let validated = config.validated();
+        assert!(validated.min_difficulty <= validated.max_difficulty);
     }
 
     #[test]

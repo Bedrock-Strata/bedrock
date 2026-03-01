@@ -93,10 +93,19 @@ impl TemplateValidator {
     }
 
     /// Update known transactions from pool's mempool
+    ///
+    /// When adding the batch would exceed capacity, evicts half the existing
+    /// entries to make room rather than clearing all (which would cause
+    /// unnecessary NeedTransactions requests for previously-known txids).
     pub fn update_known_txids(&mut self, txids: impl IntoIterator<Item = [u8; 32]>) {
         let txids_vec: Vec<[u8; 32]> = txids.into_iter().collect();
         if self.known_txids.len() + txids_vec.len() > MAX_KNOWN_TXIDS {
-            self.known_txids.clear();
+            // Evict half to amortize the cost of eviction
+            let to_keep = self.known_txids.len() / 2;
+            let to_remove: Vec<[u8; 32]> = self.known_txids.iter().skip(to_keep).copied().collect();
+            for txid in to_remove {
+                self.known_txids.remove(&txid);
+            }
         }
         self.known_txids.extend(txids_vec);
     }
@@ -109,7 +118,12 @@ impl TemplateValidator {
     /// Add a single known txid
     pub fn add_known_txid(&mut self, txid: [u8; 32]) {
         if self.known_txids.len() >= MAX_KNOWN_TXIDS {
-            self.known_txids.clear();
+            // Evict half rather than clearing all
+            let to_keep = self.known_txids.len() / 2;
+            let to_remove: Vec<[u8; 32]> = self.known_txids.iter().skip(to_keep).copied().collect();
+            for t in to_remove {
+                self.known_txids.remove(&t);
+            }
         }
         self.known_txids.insert(txid);
     }

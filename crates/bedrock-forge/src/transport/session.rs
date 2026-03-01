@@ -172,10 +172,11 @@ impl RelaySession {
 
         while self.recent_chunks.len() > MAX_RECENT_CHUNKS {
             if let Some((old_key, old_time)) = self.recent_order.pop_front() {
+                // Only remove from map if the timestamp matches (entry wasn't updated)
                 if self.recent_chunks.get(&old_key) == Some(&old_time) {
                     self.recent_chunks.remove(&old_key);
-                    break;
                 }
+                // Continue evicting until we're under the limit
             } else {
                 break;
             }

@@ -59,45 +59,80 @@ impl BlockChunker {
     }
 
     /// Serialize compact block to bytes
+    ///
+    /// Format: content_len (4) + content
+    /// where content = header_len (4) + header + nonce (8) + short_ids + prefilled
+    ///
+    /// The content_len prefix makes the format self-describing so that
+    /// FEC padding bytes (from shard size rounding) can be stripped on decode
+    /// without needing the exact original data length out-of-band.
     pub fn serialize_compact_block(compact: &CompactBlock) -> Vec<u8> {
-        // Simple serialization: header_len (4) + header + nonce (8) + short_ids + prefilled
-        let mut data = Vec::new();
+        let mut content = Vec::new();
 
         // Header length + header
         let header_len = compact.header.len() as u32;
-        data.extend_from_slice(&header_len.to_le_bytes());
-        data.extend_from_slice(&compact.header);
+        content.extend_from_slice(&header_len.to_le_bytes());
+        content.extend_from_slice(&compact.header);
 
         // Nonce
-        data.extend_from_slice(&compact.nonce.to_le_bytes());
+        content.extend_from_slice(&compact.nonce.to_le_bytes());
 
         // Short IDs count + data
         let short_id_count = compact.short_ids.len() as u32;
-        data.extend_from_slice(&short_id_count.to_le_bytes());
+        content.extend_from_slice(&short_id_count.to_le_bytes());
         for short_id in &compact.short_ids {
-            data.extend_from_slice(short_id.as_bytes());
+            content.extend_from_slice(short_id.as_bytes());
         }
 
         // Prefilled count + data
         let prefilled_count = compact.prefilled_txs.len() as u32;
-        data.extend_from_slice(&prefilled_count.to_le_bytes());
+        content.extend_from_slice(&prefilled_count.to_le_bytes());
         for prefilled in &compact.prefilled_txs {
-            data.extend_from_slice(&prefilled.index.to_le_bytes());
+            content.extend_from_slice(&prefilled.index.to_le_bytes());
             let tx_len = prefilled.tx_data.len() as u32;
-            data.extend_from_slice(&tx_len.to_le_bytes());
-            data.extend_from_slice(&prefilled.tx_data);
+            content.extend_from_slice(&tx_len.to_le_bytes());
+            content.extend_from_slice(&prefilled.tx_data);
         }
 
+        // Prepend content length so decoder can strip FEC padding
+        let mut data = Vec::with_capacity(4 + content.len());
+        data.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        data.extend_from_slice(&content);
         data
     }
 
     /// Deserialize compact block from bytes
+    ///
+    /// Reads the content_len prefix to determine the actual payload boundary,
+    /// stripping any FEC padding that may follow.
     fn deserialize_compact_block(data: &[u8]) -> std::io::Result<CompactBlock> {
         use crate::compact_block::PrefilledTx;
         use crate::types::ShortId;
         use std::io::{self, Cursor, Read};
 
-        let mut cursor = Cursor::new(data);
+        if data.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "data too short for content length prefix",
+            ));
+        }
+
+        // Read content length prefix (strips FEC padding)
+        let content_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if content_len + 4 > data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "content length {} exceeds available data ({})",
+                    content_len,
+                    data.len() - 4
+                ),
+            ));
+        }
+        // Parse only the content portion, ignoring any trailing FEC padding
+        let content = &data[4..4 + content_len];
+
+        let mut cursor = Cursor::new(content);
         let mut buf4 = [0u8; 4];
         let mut buf8 = [0u8; 8];
         let mut buf6 = [0u8; 6];
@@ -180,7 +215,7 @@ impl BlockChunker {
             ));
         }
 
-        if cursor.position() as usize != data.len() {
+        if cursor.position() as usize != content.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "trailing bytes after compact block payload",
@@ -315,77 +350,102 @@ mod tests {
         assert_eq!(recovered.prefilled_txs.len(), compact.prefilled_txs.len());
     }
 
+    /// Wrap content bytes with the content_len prefix for deserialization tests
+    fn wrap_with_len(content: &[u8]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + content.len());
+        data.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        data.extend_from_slice(content);
+        data
+    }
+
     #[test]
     fn deserialize_rejects_empty_header() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&0u32.to_le_bytes()); // header len = 0
-        data.extend_from_slice(&0u64.to_le_bytes()); // nonce
-        data.extend_from_slice(&0u32.to_le_bytes()); // short ids
-        data.extend_from_slice(&0u32.to_le_bytes()); // prefilled
+        let mut content = Vec::new();
+        content.extend_from_slice(&0u32.to_le_bytes()); // header len = 0
+        content.extend_from_slice(&0u64.to_le_bytes()); // nonce
+        content.extend_from_slice(&0u32.to_le_bytes()); // short ids
+        content.extend_from_slice(&0u32.to_le_bytes()); // prefilled
 
-        let result = BlockChunker::deserialize_compact_block(&data);
+        let result = BlockChunker::deserialize_compact_block(&wrap_with_len(&content));
         assert!(result.is_err());
     }
 
     #[test]
     fn deserialize_rejects_too_large_header() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&(MAX_HEADER_SIZE as u32 + 1).to_le_bytes());
-        data.resize(data.len() + MAX_HEADER_SIZE + 1, 0u8);
-        data.extend_from_slice(&0u64.to_le_bytes()); // nonce
-        data.extend_from_slice(&0u32.to_le_bytes()); // short ids
-        data.extend_from_slice(&0u32.to_le_bytes()); // prefilled
+        let mut content = Vec::new();
+        content.extend_from_slice(&(MAX_HEADER_SIZE as u32 + 1).to_le_bytes());
+        content.resize(content.len() + MAX_HEADER_SIZE + 1, 0u8);
+        content.extend_from_slice(&0u64.to_le_bytes()); // nonce
+        content.extend_from_slice(&0u32.to_le_bytes()); // short ids
+        content.extend_from_slice(&0u32.to_le_bytes()); // prefilled
 
-        let result = BlockChunker::deserialize_compact_block(&data);
+        let result = BlockChunker::deserialize_compact_block(&wrap_with_len(&content));
         assert!(result.is_err());
     }
 
     #[test]
     fn deserialize_rejects_too_many_txs() {
         let header = vec![0u8; 2189];
-        let mut data = Vec::new();
-        data.extend_from_slice(&(header.len() as u32).to_le_bytes());
-        data.extend_from_slice(&header);
-        data.extend_from_slice(&0u64.to_le_bytes()); // nonce
+        let mut content = Vec::new();
+        content.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        content.extend_from_slice(&header);
+        content.extend_from_slice(&0u64.to_le_bytes()); // nonce
 
         let short_id_count = (MAX_TX_COUNT + 1) as u32;
-        data.extend_from_slice(&short_id_count.to_le_bytes());
+        content.extend_from_slice(&short_id_count.to_le_bytes());
         for _ in 0..short_id_count {
-            data.extend_from_slice(&[0u8; 6]);
+            content.extend_from_slice(&[0u8; 6]);
         }
-        data.extend_from_slice(&0u32.to_le_bytes()); // prefilled
+        content.extend_from_slice(&0u32.to_le_bytes()); // prefilled
 
-        let result = BlockChunker::deserialize_compact_block(&data);
+        let result = BlockChunker::deserialize_compact_block(&wrap_with_len(&content));
         assert!(result.is_err());
     }
 
     #[test]
     fn deserialize_rejects_short_header() {
         let header = vec![0u8; 100];
-        let mut data = Vec::new();
-        data.extend_from_slice(&(header.len() as u32).to_le_bytes());
-        data.extend_from_slice(&header);
-        data.extend_from_slice(&0u64.to_le_bytes()); // nonce
-        data.extend_from_slice(&0u32.to_le_bytes()); // short ids
-        data.extend_from_slice(&0u32.to_le_bytes()); // prefilled
+        let mut content = Vec::new();
+        content.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        content.extend_from_slice(&header);
+        content.extend_from_slice(&0u64.to_le_bytes()); // nonce
+        content.extend_from_slice(&0u32.to_le_bytes()); // short ids
+        content.extend_from_slice(&0u32.to_le_bytes()); // prefilled
 
-        let result = BlockChunker::deserialize_compact_block(&data);
+        let result = BlockChunker::deserialize_compact_block(&wrap_with_len(&content));
         assert!(result.is_err());
     }
 
     #[test]
     fn deserialize_rejects_trailing_bytes() {
         let header = vec![0u8; 2189];
-        let mut data = Vec::new();
-        data.extend_from_slice(&(header.len() as u32).to_le_bytes());
-        data.extend_from_slice(&header);
-        data.extend_from_slice(&0u64.to_le_bytes()); // nonce
-        data.extend_from_slice(&0u32.to_le_bytes()); // short ids
-        data.extend_from_slice(&0u32.to_le_bytes()); // prefilled
-        data.extend_from_slice(&[0u8; 4]); // trailing garbage
+        let mut content = Vec::new();
+        content.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        content.extend_from_slice(&header);
+        content.extend_from_slice(&0u64.to_le_bytes()); // nonce
+        content.extend_from_slice(&0u32.to_le_bytes()); // short ids
+        content.extend_from_slice(&0u32.to_le_bytes()); // prefilled
+        content.extend_from_slice(&[0u8; 4]); // trailing garbage
 
-        let result = BlockChunker::deserialize_compact_block(&data);
+        let result = BlockChunker::deserialize_compact_block(&wrap_with_len(&content));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_strips_fec_padding() {
+        // Regression: estimate_original_len returned shard_size * data_shards
+        // which includes FEC padding. The content_len prefix lets the
+        // deserializer ignore padding bytes beyond the actual content.
+        let compact = make_test_compact_block();
+        let serialized = BlockChunker::serialize_compact_block(&compact);
+
+        // Add padding bytes (simulating FEC shard rounding)
+        let mut padded = serialized.clone();
+        padded.extend_from_slice(&[0u8; 7]); // 7 bytes of FEC padding
+
+        let recovered = BlockChunker::deserialize_compact_block(&padded).unwrap();
+        assert_eq!(recovered.header, compact.header);
+        assert_eq!(recovered.nonce, compact.nonce);
     }
 
     #[test]

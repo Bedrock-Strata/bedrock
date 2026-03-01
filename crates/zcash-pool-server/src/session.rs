@@ -7,14 +7,15 @@
 //! - Handles vardiff adjustments
 
 use crate::error::{PoolError, Result};
-use byteorder::{LittleEndian, WriteBytesExt};
-use std::io::Write as StdWrite;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
-use zcash_mining_protocol::codec::{encode_new_equihash_job, MessageFrame};
+use zcash_mining_protocol::codec::{
+    encode_new_equihash_job, encode_set_target as codec_encode_set_target,
+    encode_submit_shares_response as codec_encode_submit_shares_response, MessageFrame,
+};
 use zcash_mining_protocol::messages::{
     message_types, NewEquihashJob, SetTarget, ShareResult, SubmitEquihashShare,
     SubmitSharesResponse,
@@ -382,73 +383,19 @@ fn decode_submit_share(data: &[u8]) -> Result<SubmitEquihashShare> {
         .map_err(PoolError::Protocol)
 }
 
-/// Encode a SetTarget message
-/// Note: Full implementation pending in zcash-mining-protocol codec
+/// Encode a SetTarget message using the canonical codec
 fn encode_set_target(msg: &SetTarget) -> Result<Vec<u8>> {
-    let mut payload = Vec::new();
-    WriteBytesExt::write_u32::<LittleEndian>(&mut payload, msg.channel_id)
-        .expect("write to Vec is infallible");
-    StdWrite::write_all(&mut payload, &msg.target).expect("write to Vec is infallible");
-
-    let payload_len = payload.len();
-    let frame = MessageFrame {
-        extension_type: 0,
-        msg_type: message_types::SET_TARGET,
-        length: payload_len as u32,
-    };
-
-    let mut result = frame.encode().to_vec();
-    result.extend(payload);
-
-    debug!(
-        "Encoded SetTarget: channel={}, payload_len={}",
-        msg.channel_id,
-        payload_len
-    );
-
-    Ok(result)
+    codec_encode_set_target(msg).map_err(PoolError::Protocol)
 }
 
-/// Encode a SubmitSharesResponse message
-/// Note: Full implementation pending in zcash-mining-protocol codec
+/// Encode a SubmitSharesResponse using the canonical codec.
+///
+/// Previously this function had an incompatible wire format: it encoded
+/// rejection as a single byte (1=StaleJob, 2=Duplicate, etc.) instead of
+/// the canonical two-byte format (0x01=Rejected + reason_code). This caused
+/// clients using the canonical decoder to fail parsing server responses.
 fn encode_submit_shares_response(msg: &SubmitSharesResponse) -> Result<Vec<u8>> {
-    let mut payload = Vec::new();
-    WriteBytesExt::write_u32::<LittleEndian>(&mut payload, msg.channel_id)
-        .expect("write to Vec is infallible");
-    WriteBytesExt::write_u32::<LittleEndian>(&mut payload, msg.sequence_number)
-        .expect("write to Vec is infallible");
-
-    // Encode result: 0 = accepted, 1+ = rejection reason
-    let result_code: u8 = match &msg.result {
-        ShareResult::Accepted => 0,
-        ShareResult::Rejected(reason) => {
-            use zcash_mining_protocol::messages::RejectReason;
-            match reason {
-                RejectReason::StaleJob => 1,
-                RejectReason::Duplicate => 2,
-                RejectReason::InvalidSolution => 3,
-                RejectReason::LowDifficulty => 4,
-                RejectReason::Other(_) => 5,
-            }
-        }
-    };
-    payload.push(result_code);
-
-    let frame = MessageFrame {
-        extension_type: 0,
-        msg_type: message_types::SUBMIT_SHARES_RESPONSE,
-        length: payload.len() as u32,
-    };
-
-    let mut result = frame.encode().to_vec();
-    result.extend(payload);
-
-    debug!(
-        "Encoded SubmitSharesResponse: channel={}, seq={}, result={}",
-        msg.channel_id, msg.sequence_number, result_code
-    );
-
-    Ok(result)
+    codec_encode_submit_shares_response(msg).map_err(PoolError::Protocol)
 }
 
 #[cfg(test)]
@@ -488,8 +435,8 @@ mod tests {
         // Check message type
         assert_eq!(encoded[2], message_types::SUBMIT_SHARES_RESPONSE);
 
-        // Check result code (last byte of payload)
-        assert_eq!(encoded[encoded.len() - 1], 0); // Accepted
+        // Check result code: 0x00 = Accepted
+        assert_eq!(encoded[encoded.len() - 1], 0);
     }
 
     #[test]
@@ -502,7 +449,31 @@ mod tests {
 
         let encoded = encode_submit_shares_response(&msg).unwrap();
 
-        // Check result code
-        assert_eq!(encoded[encoded.len() - 1], 1); // StaleJob
+        // Canonical format: header(6) + channel_id(4) + seq(4) + rejected(1) + reason(1) = 16
+        assert_eq!(encoded.len(), 6 + 4 + 4 + 1 + 1);
+
+        // Check result code: 0x01 = Rejected
+        assert_eq!(encoded[6 + 4 + 4], 0x01);
+
+        // Check reason code: 0x00 = StaleJob
+        assert_eq!(encoded[6 + 4 + 4 + 1], 0x00);
+    }
+
+    #[test]
+    fn test_encode_submit_shares_response_roundtrip() {
+        // Verify encode/decode roundtrip works with the canonical codec
+        let msg = SubmitSharesResponse {
+            channel_id: 42,
+            sequence_number: 999,
+            result: ShareResult::Rejected(RejectReason::Duplicate),
+        };
+
+        let encoded = encode_submit_shares_response(&msg).unwrap();
+        let decoded = zcash_mining_protocol::codec::decode_submit_shares_response(&encoded)
+            .expect("canonical decode should succeed");
+
+        assert_eq!(decoded.channel_id, 42);
+        assert_eq!(decoded.sequence_number, 999);
+        assert_eq!(decoded.result, ShareResult::Rejected(RejectReason::Duplicate));
     }
 }

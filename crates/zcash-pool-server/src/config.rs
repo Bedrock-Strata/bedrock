@@ -119,6 +119,10 @@ pub enum ConfigError {
     InvalidFecConfig { data: usize, parity: usize },
     /// JD enabled but no pool payout script
     JdMissingPayoutScript,
+    /// Invalid timing jitter configuration (min > max)
+    InvalidTimingJitter { min_ms: u64, max_ms: u64 },
+    /// Invalid FEC shard total (must be <= 255 for Reed-Solomon)
+    InvalidFecShardTotal { total: usize },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -146,6 +150,20 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::JdMissingPayoutScript => {
                 write!(f, "jd_listen_addr set but pool_payout_script is missing")
+            }
+            ConfigError::InvalidTimingJitter { min_ms, max_ms } => {
+                write!(
+                    f,
+                    "timing_jitter_min_ms ({}) must be <= timing_jitter_max_ms ({})",
+                    min_ms, max_ms
+                )
+            }
+            ConfigError::InvalidFecShardTotal { total } => {
+                write!(
+                    f,
+                    "FEC shard total {} exceeds Reed-Solomon maximum of 255",
+                    total
+                )
             }
         }
     }
@@ -206,6 +224,22 @@ impl PoolConfig {
         // JD requires payout script
         if self.jd_listen_addr.is_some() && self.pool_payout_script.is_none() {
             return Err(ConfigError::JdMissingPayoutScript);
+        }
+
+        // Timing jitter min must not exceed max
+        if self.timing_jitter_enabled && self.timing_jitter_min_ms > self.timing_jitter_max_ms {
+            return Err(ConfigError::InvalidTimingJitter {
+                min_ms: self.timing_jitter_min_ms,
+                max_ms: self.timing_jitter_max_ms,
+            });
+        }
+
+        // FEC shard total must fit in Reed-Solomon's u8 limit
+        if self.forge_relay_enabled {
+            let total = self.forge_data_shards + self.forge_parity_shards;
+            if total > 255 {
+                return Err(ConfigError::InvalidFecShardTotal { total });
+            }
         }
 
         Ok(())

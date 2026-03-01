@@ -467,11 +467,20 @@ pub fn decode_push_solution(data: &[u8]) -> Result<PushSolution> {
 // Full-Template Mode Codec Functions (0x56-0x5A)
 // =============================================================================
 
+/// Maximum number of transactions in a single message
+const MAX_TX_COUNT: u16 = 10_000;
+
 /// Helper to read a u16-prefixed vector of 32-byte arrays
 fn read_tx_ids(cursor: &mut Cursor<&[u8]>) -> Result<Vec<[u8; 32]>> {
     let count = cursor
         .read_u16::<LittleEndian>()
         .map_err(|e| JdServerError::Protocol(e.to_string()))?;
+    if count > MAX_TX_COUNT {
+        return Err(JdServerError::Protocol(format!(
+            "Transaction ID count {} exceeds maximum {}",
+            count, MAX_TX_COUNT
+        )));
+    }
     let mut result = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let mut txid = [0u8; 32];
@@ -498,6 +507,12 @@ fn read_tx_data(cursor: &mut Cursor<&[u8]>) -> Result<Vec<Vec<u8>>> {
     let count = cursor
         .read_u16::<LittleEndian>()
         .map_err(|e| JdServerError::Protocol(e.to_string()))?;
+    if count > MAX_TX_COUNT {
+        return Err(JdServerError::Protocol(format!(
+            "Transaction data count {} exceeds maximum {}",
+            count, MAX_TX_COUNT
+        )));
+    }
     let mut result = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let tx = read_bytes_u32(cursor)?;

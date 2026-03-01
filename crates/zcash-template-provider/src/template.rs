@@ -134,10 +134,14 @@ impl TemplateProvider {
                     );
 
                     if last_fingerprint.as_deref() != Some(&fingerprint) {
-                        last_fingerprint = Some(fingerprint);
-
                         match self.process_template(response) {
                             Ok(template) => {
+                                // Only commit the fingerprint AFTER successful processing.
+                                // Previously, fingerprint was set before process_template(),
+                                // so a processing failure would cause the next identical
+                                // template to be skipped (fingerprint already matched).
+                                last_fingerprint = Some(fingerprint);
+
                                 info!(
                                     "New template: height={}, fees={}",
                                     template.height, template.total_fees
@@ -153,6 +157,7 @@ impl TemplateProvider {
                             }
                             Err(e) => {
                                 error!("Failed to process template: {}", e);
+                                // fingerprint is NOT updated, so next poll will retry
                             }
                         }
                     }

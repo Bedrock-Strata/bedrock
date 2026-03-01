@@ -240,9 +240,14 @@ impl ReconnectManager {
         let jitter_multiplier = (pseudo_random * 2.0 - 1.0) * jitter_factor;
 
         // Ensure the final multiplier stays positive (1.0 + jitter_multiplier > 0)
+        // and never reduces the delay below initial_delay (delayMinimum invariant)
         let final_multiplier = (1.0 + jitter_multiplier).max(0.1);
+        let jittered = delay.mul_f64(final_multiplier);
 
-        delay.mul_f64(final_multiplier)
+        // Clamp to initial_delay: jitter should never reduce delay below
+        // the configured minimum, per the Quint ReconnectBackoff spec's
+        // delayMinimum invariant
+        jittered.max(self.config.initial_delay)
     }
 
     /// Record a failure for pattern analysis

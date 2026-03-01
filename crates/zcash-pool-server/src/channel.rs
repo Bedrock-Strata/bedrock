@@ -172,8 +172,14 @@ impl Channel {
             .unwrap_or(false)
     }
 
-    /// Return the set of all job IDs tracked by this channel
-    pub fn active_job_ids(&self) -> impl Iterator<Item = u32> + '_ {
+    /// Return IDs of all tracked jobs (active and inactive).
+    ///
+    /// Includes inactive jobs because their duplicate-detection entries must be
+    /// retained while in-flight shares could still reference them.  If only
+    /// active IDs were returned, `prune_inactive` would drop dup entries for
+    /// recently-deactivated jobs, re-opening the race condition modeled by the
+    /// Quint DuplicateRace module.
+    pub fn tracked_job_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.jobs.keys().copied()
     }
 

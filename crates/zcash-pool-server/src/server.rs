@@ -356,25 +356,37 @@ impl PoolServer {
                             if self.config.noise_enabled {
                                 if let Some(ref responder) = self.noise_responder {
                                     self.metrics.record_noise_handshake();
-                                    match responder.accept(stream).await {
-                                        Ok(noise_stream) => {
-                                            info!("Noise handshake successful for {}", addr);
-                                            if let Err(e) = self.handle_new_connection(Transport::Noise(noise_stream), addr).await {
-                                                self.metrics.record_disconnection();
-                                                error!("Error handling new Noise connection: {}", e);
-                                            }
-                                        }
-                                        Err(e) => {
+                                    // Timeout prevents a malicious client from stalling
+                                    // the handshake indefinitely, blocking the accept loop
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(10),
+                                        responder.accept(stream),
+                                    ).await {
+                                        Err(_) => {
                                             self.metrics.record_noise_handshake_failed();
                                             self.metrics.record_disconnection();
-                                            self.metrics.record_decryption_failure();
-                                            warn!("Noise handshake failed for {}: {}", addr, e);
+                                            warn!("Noise handshake timed out for {}", addr);
+                                        }
+                                        Ok(inner) => match inner {
+                                            Ok(noise_stream) => {
+                                                info!("Noise handshake successful for {}", addr);
+                                                if let Err(e) = self.handle_new_connection(Transport::Noise(noise_stream), addr).await {
+                                                    self.metrics.record_disconnection();
+                                                    error!("Error handling new Noise connection: {}", e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                self.metrics.record_noise_handshake_failed();
+                                                self.metrics.record_disconnection();
+                                                self.metrics.record_decryption_failure();
+                                                warn!("Noise handshake failed for {}: {}", addr, e);
 
-                                            // Track handshake failure as decryption error
-                                            if self.config.connection_tracking_enabled {
-                                                let connected_at = self.connection_tracker.on_connect(addr);
-                                                if self.connection_tracker.on_disconnect(addr, connected_at, true) {
-                                                    self.metrics.inc_flagged_addresses();
+                                                // Track handshake failure as decryption error
+                                                if self.config.connection_tracking_enabled {
+                                                    let connected_at = self.connection_tracker.on_connect(addr);
+                                                    if self.connection_tracker.on_disconnect(addr, connected_at, true) {
+                                                        self.metrics.inc_flagged_addresses();
+                                                    }
                                                 }
                                             }
                                         }
@@ -702,7 +714,7 @@ impl PoolServer {
         if is_new_block {
             let active_job_ids: HashSet<u32> = {
                 let channels = self.channels.read().await;
-                channels.values().flat_map(|ch| ch.active_job_ids()).collect()
+                channels.values().flat_map(|ch| ch.tracked_job_ids()).collect()
             };
             self.duplicate_detector.prune_inactive(&active_job_ids);
             info!("New block detected, pruned inactive jobs from duplicate detector");

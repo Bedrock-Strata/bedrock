@@ -157,6 +157,12 @@ impl SequenceValidator {
                 state.anomaly_count += 1;
                 return SequenceCheckResult::ValidOutOfOrder;
             } else {
+                // Update highest_seen even on large gap to prevent permanently
+                // breaking the validator. Without this, all future sequences
+                // would also be seen as GapTooLarge since they'd be compared
+                // against the old, stale highest_seen value.
+                state.highest_seen = sequence;
+                Self::add_to_window(&mut state.seen_window, sequence, self.window_size);
                 state.anomaly_count += 1;
                 warn!(
                     "Large gap detected: channel {} seq {} (expected ~{}), gap={}",
@@ -694,6 +700,47 @@ mod tests {
         assert_eq!(
             validator.validate(1, 100),
             SequenceCheckResult::GapTooLarge
+        );
+    }
+
+    #[test]
+    fn test_sequence_large_gap_recovers() {
+        // After a GapTooLarge, the validator must recover: subsequent
+        // in-order sequences from the new position should be Valid.
+        // Previously, highest_seen was not updated on GapTooLarge,
+        // permanently breaking the validator for that channel.
+        let validator = SequenceValidator::new(10, 64);
+        validator.validate(1, 1);
+
+        // Large gap triggers GapTooLarge
+        assert_eq!(
+            validator.validate(1, 100),
+            SequenceCheckResult::GapTooLarge
+        );
+
+        // Next in-order sequence after the gap should be Valid
+        assert_eq!(
+            validator.validate(1, 101),
+            SequenceCheckResult::Valid
+        );
+        assert_eq!(
+            validator.validate(1, 102),
+            SequenceCheckResult::Valid
+        );
+    }
+
+    #[test]
+    fn test_sequence_large_gap_prevents_replay_after_recovery() {
+        // After recovering from GapTooLarge, the jumped-to sequence
+        // should be in the window and rejected as Replay
+        let validator = SequenceValidator::new(10, 64);
+        validator.validate(1, 1);
+        validator.validate(1, 100); // GapTooLarge but updates state
+
+        // Replaying 100 should be caught
+        assert_eq!(
+            validator.validate(1, 100),
+            SequenceCheckResult::Replay
         );
     }
 

@@ -98,7 +98,18 @@ impl Session {
                             match self.decode_share_message(&msg) {
                                 Ok(share) => {
                                     if let Err(e) = self.handle_share(share).await {
-                                        warn!("Error handling share: {}", e);
+                                        match &e {
+                                            PoolError::Timeout | PoolError::ChannelSend => {
+                                                error!(
+                                                    "Fatal share handling error for channel {}: {} - disconnecting",
+                                                    channel_id, e
+                                                );
+                                                break;
+                                            }
+                                            _ => {
+                                                warn!("Error handling share: {}", e);
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {

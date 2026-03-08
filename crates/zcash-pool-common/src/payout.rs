@@ -107,6 +107,20 @@ impl PayoutTracker {
         }
     }
 
+    /// Rotate the rolling window once it has reached the configured duration.
+    pub fn rotate_window_if_needed(&self) {
+        let should_reset = {
+            let window_start = self.window_start.read().unwrap_or_else(|e| e.into_inner());
+            window_start
+                .map(|start| start.elapsed() >= self.window_duration)
+                .unwrap_or(false)
+        };
+
+        if should_reset {
+            self.reset_window();
+        }
+    }
+
     /// Get total pool hashrate estimate (based on difficulty sum over window)
     pub fn estimate_pool_hashrate(&self) -> f64 {
         let miners = self.miners.read().unwrap_or_else(|e| e.into_inner());

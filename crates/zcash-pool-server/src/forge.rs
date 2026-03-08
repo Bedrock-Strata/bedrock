@@ -43,7 +43,8 @@ impl ForgeRelay {
 
         let client_config = ClientConfig::new(relay_peers, auth_key)
             .with_fec(config.forge_data_shards, config.forge_parity_shards)
-            .with_bind_addr(config.forge_bind_addr.unwrap_or_else(|| "0.0.0.0:0".parse().expect("0.0.0.0:0 is a valid address")));
+            .with_bind_addr(config.forge_bind_addr.unwrap_or_else(|| "0.0.0.0:0".parse().expect("0.0.0.0:0 is a valid address")))
+            .with_auth_required(true);
 
         let client = RelayClient::new(client_config)
             .map_err(|e| PoolError::Config(format!("forge client creation failed: {}", e)))?;
@@ -74,11 +75,13 @@ impl ForgeRelay {
     ///
     /// Returns a handle that can be used to stop the client.
     pub async fn start(&self) -> Result<()> {
-        let mut client = self.client.write().await;
-        // Take the receiver to allow the run loop to work
-        if client.take_receiver().is_none() {
-            warn!("Forge relay receiver already taken");
-        }
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            let mut client = client.write().await;
+            if let Err(e) = client.run().await {
+                warn!("Forge relay client exited with error: {}", e);
+            }
+        });
         Ok(())
     }
 

@@ -79,3 +79,24 @@ jobs:
       - name: Run corpus regression
         working-directory: crates/zcash-jd-server
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0
+
+  fuzz-equihash-validator:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_compact_to_target
+          - fuzz_difficulty_roundtrip
+          - fuzz_target_ordering
+          - fuzz_verify_solution_rejects
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - uses: actions/cache@v4
+        with:
+          path: crates/zcash-equihash-validator/fuzz/target
+          key: fuzz-equihash-${{ matrix.target }}-${{ hashFiles('crates/zcash-equihash-validator/**/*.rs') }}
+      - name: Run corpus regression
+        working-directory: crates/zcash-equihash-validator
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0

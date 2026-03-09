@@ -1,0 +1,40 @@
+name: Fuzz Regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  fuzz-regression:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_frame_decode
+          - fuzz_decode_new_job
+          - fuzz_decode_submit_share
+          - fuzz_decode_submit_response
+          - fuzz_decode_set_target
+          - fuzz_roundtrip_new_job
+          - fuzz_roundtrip_submit_share
+          - fuzz_roundtrip_submit_response
+          - fuzz_roundtrip_set_target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Cache fuzz build
+        uses: actions/cache@v4
+        with:
+          path: crates/zcash-mining-protocol/fuzz/target
+          key: fuzz-${{ matrix.target }}-${{ hashFiles('crates/zcash-mining-protocol/**/*.rs') }}
+
+      - name: Run corpus regression
+        working-directory: crates/zcash-mining-protocol
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0

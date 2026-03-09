@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  fuzz-regression:
+  fuzz-mining-protocol:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -22,19 +22,60 @@ jobs:
           - fuzz_roundtrip_set_target
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
-      - name: Cache fuzz build
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - uses: actions/cache@v4
         with:
           path: crates/zcash-mining-protocol/fuzz/target
-          key: fuzz-${{ matrix.target }}-${{ hashFiles('crates/zcash-mining-protocol/**/*.rs') }}
-
+          key: fuzz-mining-${{ matrix.target }}-${{ hashFiles('crates/zcash-mining-protocol/**/*.rs') }}
       - name: Run corpus regression
         working-directory: crates/zcash-mining-protocol
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0
+
+  fuzz-bedrock-forge:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_chunk_header
+          - fuzz_chunk
+          - fuzz_roundtrip_chunk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - uses: actions/cache@v4
+        with:
+          path: crates/bedrock-forge/fuzz/target
+          key: fuzz-forge-${{ matrix.target }}-${{ hashFiles('crates/bedrock-forge/**/*.rs') }}
+      - name: Run corpus regression
+        working-directory: crates/bedrock-forge
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0
+
+  fuzz-jd-server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_decode_allocate_token
+          - fuzz_decode_allocate_token_success
+          - fuzz_decode_set_custom_job
+          - fuzz_decode_set_custom_job_success
+          - fuzz_decode_set_custom_job_error
+          - fuzz_decode_push_solution
+          - fuzz_decode_set_full_template
+          - fuzz_decode_set_full_template_success
+          - fuzz_decode_set_full_template_error
+          - fuzz_decode_get_missing_tx
+          - fuzz_decode_provide_missing_tx
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - uses: actions/cache@v4
+        with:
+          path: crates/zcash-jd-server/fuzz/target
+          key: fuzz-jd-${{ matrix.target }}-${{ hashFiles('crates/zcash-jd-server/**/*.rs') }}
+      - name: Run corpus regression
+        working-directory: crates/zcash-jd-server
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0

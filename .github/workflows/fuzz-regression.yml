@@ -181,3 +181,22 @@ jobs:
       - name: Run corpus regression
         working-directory: crates/bedrock-noise
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0
+
+  fuzz-pool-server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_sequence_validator
+          - fuzz_connection_tracker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - uses: actions/cache@v4
+        with:
+          path: crates/zcash-pool-server/fuzz/target
+          key: fuzz-pool-server-${{ matrix.target }}-${{ hashFiles('crates/zcash-pool-server/**/*.rs') }}
+      - name: Run corpus regression
+        working-directory: crates/zcash-pool-server
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -runs=0

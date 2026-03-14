@@ -23,12 +23,21 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let encoded = match encode_submit_shares_response(&resp) {
+    let encoded1 = match encode_submit_shares_response(&resp) {
         Ok(e) => e,
         Err(_) => return,
     };
-    let decoded = decode_submit_shares_response(&encoded)
+    let decoded1 = decode_submit_shares_response(&encoded1)
         .expect("decode must succeed for encoder output");
 
-    assert_eq!(resp, decoded, "roundtrip mismatch");
+    assert_eq!(resp, decoded1, "first roundtrip mismatch");
+
+    // Double roundtrip: re-encode and re-decode to catch asymmetric codec bugs
+    let encoded2 = encode_submit_shares_response(&decoded1)
+        .expect("re-encode must succeed for decoded value");
+    assert_eq!(encoded1, encoded2, "double-roundtrip encoded mismatch");
+
+    let decoded2 = decode_submit_shares_response(&encoded2)
+        .expect("re-decode must succeed for re-encoded output");
+    assert_eq!(decoded1, decoded2, "double-roundtrip decoded mismatch");
 });

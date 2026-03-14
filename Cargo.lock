@@ -247,6 +247,7 @@ dependencies = [
 name = "bedrock-noise"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "hex",
  "rand 0.8.5",
  "snow",
@@ -3765,6 +3766,7 @@ dependencies = [
 name = "zcash-pool-common"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "proptest",
  "tracing",
 ]
@@ -3777,6 +3779,7 @@ dependencies = [
  "bedrock-noise",
  "bedrock-strata",
  "byteorder",
+ "criterion",
  "hex",
  "rand 0.8.5",
  "rustc-hash",

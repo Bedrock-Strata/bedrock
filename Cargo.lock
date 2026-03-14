@@ -3698,6 +3698,7 @@ dependencies = [
  "blake2b_simd",
  "equihash",
  "hex",
+ "proptest",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -3754,6 +3755,7 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "byteorder",
+ "proptest",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -3763,6 +3765,7 @@ dependencies = [
 name = "zcash-pool-common"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "tracing",
 ]
 
@@ -3796,6 +3799,7 @@ version = "0.1.0"
 dependencies = [
  "blake2b_simd",
  "hex",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",

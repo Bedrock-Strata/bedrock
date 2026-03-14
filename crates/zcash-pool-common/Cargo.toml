@@ -7,3 +7,6 @@ description = "Common types shared between pool server components"
 
 [dependencies]
 tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.4"

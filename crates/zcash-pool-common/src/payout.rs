@@ -290,4 +290,102 @@ mod tests {
         tracker.cleanup_stale_miners(Duration::ZERO);
         assert_eq!(tracker.get_all_stats().len(), 0);
     }
+
+    #[test]
+    fn test_estimate_pool_hashrate_no_shares() {
+        let tracker = PayoutTracker::default();
+        assert_eq!(tracker.estimate_pool_hashrate(), 0.0);
+    }
+
+    #[test]
+    fn test_estimate_pool_hashrate_with_shares() {
+        let tracker = PayoutTracker::default();
+        tracker.record_share(&"miner1".to_string(), 100.0);
+        tracker.record_share(&"miner2".to_string(), 200.0);
+        let rate = tracker.estimate_pool_hashrate();
+        assert!(rate > 0.0, "hashrate should be positive after shares");
+    }
+
+    #[test]
+    fn test_active_miner_count_empty() {
+        let tracker = PayoutTracker::default();
+        assert_eq!(tracker.active_miner_count(), 0);
+    }
+
+    #[test]
+    fn test_active_miner_count_with_shares() {
+        let tracker = PayoutTracker::default();
+        tracker.record_share(&"miner1".to_string(), 100.0);
+        tracker.record_share(&"miner2".to_string(), 200.0);
+        assert_eq!(tracker.active_miner_count(), 2);
+    }
+
+    #[test]
+    fn test_remove_miner_decreases_count() {
+        let tracker = PayoutTracker::default();
+        tracker.record_share(&"miner1".to_string(), 100.0);
+        tracker.record_share(&"miner2".to_string(), 200.0);
+        tracker.remove_miner(&"miner1".to_string());
+        assert!(tracker.get_stats(&"miner1".to_string()).is_none());
+        assert!(tracker.get_stats(&"miner2".to_string()).is_some());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_miner_no_panic() {
+        let tracker = PayoutTracker::default();
+        tracker.remove_miner(&"ghost".to_string());
+    }
+
+    #[test]
+    fn test_record_share_many_miners() {
+        let tracker = PayoutTracker::default();
+        for i in 0..1000 {
+            tracker.record_share(&format!("miner_{}", i), 1.0);
+        }
+        let all = tracker.get_all_stats();
+        assert_eq!(all.len(), 1000);
+    }
+
+    #[test]
+    fn test_window_difficulty_accumulation() {
+        let tracker = PayoutTracker::default();
+        let miner = "miner1".to_string();
+        for _ in 0..100 {
+            tracker.record_share(&miner, 1.5);
+        }
+        let stats = tracker.get_stats(&miner).unwrap();
+        assert_eq!(stats.total_shares, 100);
+        assert!((stats.total_difficulty - 150.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_rotate_window_if_needed_before_duration() {
+        let tracker = PayoutTracker::new(Duration::from_secs(3600));
+        let miner = "miner1".to_string();
+        tracker.record_share(&miner, 100.0);
+        tracker.rotate_window_if_needed();
+        let stats = tracker.get_stats(&miner).unwrap();
+        assert_eq!(stats.window_shares, 1);
+    }
+
+    #[test]
+    fn test_rotate_window_if_needed_after_duration() {
+        let tracker = PayoutTracker::new(Duration::from_millis(1));
+        let miner = "miner1".to_string();
+        tracker.record_share(&miner, 100.0);
+        std::thread::sleep(Duration::from_millis(5));
+        tracker.rotate_window_if_needed();
+        let stats = tracker.get_stats(&miner).unwrap();
+        assert_eq!(stats.window_shares, 0);
+        assert_eq!(stats.total_shares, 1);
+    }
+
+    #[test]
+    fn test_cleanup_stale_miners_preserves_recent() {
+        let tracker = PayoutTracker::default();
+        tracker.record_share(&"miner1".to_string(), 100.0);
+        tracker.record_share(&"miner2".to_string(), 200.0);
+        tracker.cleanup_stale_miners(Duration::from_secs(3600));
+        assert_eq!(tracker.get_all_stats().len(), 2);
+    }
 }

@@ -16,3 +16,4 @@ arbitrary = ["dep:arbitrary"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+proptest = "1.4"

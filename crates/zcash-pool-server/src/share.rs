@@ -280,4 +280,209 @@ mod tests {
             _ => {} // Any other result (accepted or rejected for solution) is fine
         }
     }
+
+    /// Helper to create a Channel with a given nonce_1 for tests
+    fn make_test_channel(nonce_1: Vec<u8>) -> Channel {
+        use zcash_equihash_validator::VardiffConfig;
+        Channel::new_with_id(1, nonce_1, VardiffConfig::default()).unwrap()
+    }
+
+    /// Helper to create a NewEquihashJob for tests
+    fn make_test_job(job_id: u32, nonce_1: &[u8], nonce_2_len: u8, time: u32) -> NewEquihashJob {
+        NewEquihashJob {
+            channel_id: 1,
+            job_id,
+            future_job: false,
+            version: 5,
+            prev_hash: [0; 32],
+            merkle_root: [0; 32],
+            block_commitments: [0; 32],
+            nonce_1: nonce_1.to_vec(),
+            nonce_2_len,
+            time,
+            bits: 0x2007ffff,
+            target: [0xff; 32],
+            clean_jobs: false,
+        }
+    }
+
+    #[test]
+    fn test_validate_share_unknown_job() {
+        use crate::duplicate::InMemoryDuplicateDetector;
+
+        let mut channel = make_test_channel(vec![0; 4]);
+        let job = make_test_job(1, &channel.nonce_1, channel.nonce_2_len, 1_700_000_000);
+        channel.add_job(job, false);
+
+        let processor = ShareProcessor::new();
+        let detector = InMemoryDuplicateDetector::new();
+        let block_target = [0xff; 32];
+
+        let share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 1,
+            job_id: 999,
+            nonce_2: vec![0; 28],
+            time: 1_700_000_000,
+            solution: [0; 1344],
+        };
+
+        let result = processor.validate_share(&share, &channel, &detector, &block_target);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PoolError::UnknownJob(id) => assert_eq!(id, 999),
+            other => panic!("Expected UnknownJob(999), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_share_stale_job() {
+        use crate::duplicate::InMemoryDuplicateDetector;
+
+        let mut channel = make_test_channel(vec![0; 4]);
+        let job1 = make_test_job(1, &channel.nonce_1, channel.nonce_2_len, 1_700_000_000);
+        channel.add_job(job1, false);
+
+        let job2 = make_test_job(2, &channel.nonce_1, channel.nonce_2_len, 1_700_000_000);
+        channel.add_job(job2, true); // clean_jobs=true marks job 1 stale
+
+        let processor = ShareProcessor::new();
+        let detector = InMemoryDuplicateDetector::new();
+        let block_target = [0xff; 32];
+
+        let share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 1,
+            job_id: 1,
+            nonce_2: vec![0; 28],
+            time: 1_700_000_000,
+            solution: [0; 1344],
+        };
+
+        let result = processor.validate_share(&share, &channel, &detector, &block_target).unwrap();
+        assert!(!result.accepted);
+        assert!(
+            matches!(result.result, ShareResult::Rejected(RejectReason::StaleJob)),
+            "Expected StaleJob rejection, got: {:?}",
+            result.result
+        );
+    }
+
+    #[test]
+    fn test_validate_share_wrong_nonce2_length() {
+        use crate::duplicate::InMemoryDuplicateDetector;
+
+        let mut channel = make_test_channel(vec![0; 4]); // nonce_2_len = 28
+        let job = make_test_job(1, &channel.nonce_1, channel.nonce_2_len, 1_700_000_000);
+        channel.add_job(job, false);
+
+        let processor = ShareProcessor::new();
+        let detector = InMemoryDuplicateDetector::new();
+        let block_target = [0xff; 32];
+
+        let share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 1,
+            job_id: 1,
+            nonce_2: vec![0; 10], // Wrong length: 10 instead of 28
+            time: 1_700_000_000,
+            solution: [0; 1344],
+        };
+
+        let result = processor.validate_share(&share, &channel, &detector, &block_target);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PoolError::InvalidMessage(msg) => {
+                assert!(msg.contains("nonce"), "Error message should mention nonce: {}", msg);
+            }
+            other => panic!("Expected InvalidMessage, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_share_duplicate_via_channel() {
+        use crate::duplicate::InMemoryDuplicateDetector;
+
+        let mut channel = make_test_channel(vec![0; 4]);
+        let job = make_test_job(1, &channel.nonce_1, channel.nonce_2_len, 1_700_000_000);
+        channel.add_job(job, false);
+
+        let processor = ShareProcessor::new();
+        let detector = InMemoryDuplicateDetector::new();
+        let block_target = [0xff; 32];
+
+        let share = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 1,
+            job_id: 1,
+            nonce_2: vec![0; 28],
+            time: 1_700_000_000,
+            solution: [0; 1344],
+        };
+
+        // First submission -- will get InvalidSolution (dummy solution), but not Duplicate
+        let result1 = processor.validate_share(&share, &channel, &detector, &block_target).unwrap();
+        assert!(
+            !matches!(result1.result, ShareResult::Rejected(RejectReason::Duplicate)),
+            "First submission should not be duplicate, got: {:?}",
+            result1.result
+        );
+
+        // Second submission of exact same share -- should get Duplicate
+        let result2 = processor.validate_share(&share, &channel, &detector, &block_target).unwrap();
+        assert!(
+            matches!(result2.result, ShareResult::Rejected(RejectReason::Duplicate)),
+            "Second submission should be duplicate, got: {:?}",
+            result2.result
+        );
+    }
+
+    #[test]
+    fn test_timestamp_boundary_acceptance() {
+        use crate::duplicate::InMemoryDuplicateDetector;
+
+        let mut channel = make_test_channel(vec![0; 4]);
+        let job_time: u32 = 1_700_000_000;
+        let job = make_test_job(1, &channel.nonce_1, channel.nonce_2_len, job_time);
+        channel.add_job(job, false);
+
+        let processor = ShareProcessor::new();
+        let block_target = [0xff; 32];
+
+        // Share at exactly job_time - 60 (boundary, should NOT be rejected for timestamp)
+        let detector1 = InMemoryDuplicateDetector::new();
+        let share_at_lower_bound = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 1,
+            job_id: 1,
+            nonce_2: vec![0; 28],
+            time: job_time - 60,
+            solution: [0; 1344],
+        };
+        let result = processor.validate_share(&share_at_lower_bound, &channel, &detector1, &block_target).unwrap();
+        match result.result {
+            ShareResult::Rejected(RejectReason::Other(ref msg)) if msg.contains("timestamp") => {
+                panic!("time=job_time-60 should be accepted by timestamp check, got: {:?}", result.result);
+            }
+            _ => {} // InvalidSolution or anything else is fine
+        }
+
+        // Share at exactly job_time + 7200 (boundary, should NOT be rejected for timestamp)
+        let detector2 = InMemoryDuplicateDetector::new();
+        let share_at_upper_bound = SubmitEquihashShare {
+            channel_id: 1,
+            sequence_number: 2,
+            job_id: 1,
+            nonce_2: vec![1; 28], // Different nonce to avoid duplicate
+            time: job_time + 7200,
+            solution: [0; 1344],
+        };
+        let result = processor.validate_share(&share_at_upper_bound, &channel, &detector2, &block_target).unwrap();
+        match result.result {
+            ShareResult::Rejected(RejectReason::Other(ref msg)) if msg.contains("timestamp") => {
+                panic!("time=job_time+7200 should be accepted by timestamp check, got: {:?}", result.result);
+            }
+            _ => {} // InvalidSolution or anything else is fine
+        }
+    }
 }

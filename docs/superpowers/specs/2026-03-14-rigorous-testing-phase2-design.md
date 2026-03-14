@@ -37,13 +37,36 @@ TestTemplateFactory::new()
     .build()
 ```
 
-This avoids every test manually constructing the full 10+ field response struct.
+This avoids every test manually constructing the full 10+ field response struct. The factory MUST produce templates with valid `EquihashHeader` serialization (140 bytes exactly) -- downstream tests depend on `header.serialize()` returning the correct size.
+
+### Cross-crate visibility
+
+`MockZebraRpc` and `TestTemplateFactory` must be usable from downstream crates (e.g., `zcash-pool-server` tests). A `#[cfg(test)]` module is NOT visible to other crates. Use a **`test-support` feature flag** that gates `pub mod testutil`:
+
+```toml
+# zcash-template-provider/Cargo.toml
+[features]
+test-support = []
+```
+
+```rust
+// src/lib.rs
+#[cfg(feature = "test-support")]
+pub mod testutil;
+```
+
+Downstream crates add `zcash-template-provider = { path = "...", features = ["test-support"] }` in `[dev-dependencies]`.
+
+### API approach
+
+Use `Box<dyn RpcProvider>` rather than generics to avoid changing the public `TemplateProvider::new()` signature. The `TemplateProvider` struct stores `rpc: Box<dyn RpcProvider>` and production callers construct it the same way (the constructor boxes `ZebraRpc` internally).
 
 ### Files
 
 - Modify: `crates/zcash-template-provider/src/rpc.rs` -- extract `RpcProvider` trait
-- Modify: `crates/zcash-template-provider/src/template.rs` -- make `TemplateProvider` generic over `RpcProvider`
-- Create: `crates/zcash-template-provider/src/testutil.rs` -- `MockZebraRpc` + `TestTemplateFactory` (behind `#[cfg(test)]` or `pub` for cross-crate test use)
+- Modify: `crates/zcash-template-provider/src/template.rs` -- change `rpc` field from `ZebraRpc` to `Box<dyn RpcProvider>`
+- Create: `crates/zcash-template-provider/src/testutil.rs` -- `MockZebraRpc` + `TestTemplateFactory`, gated behind `test-support` feature
+- Modify: `crates/zcash-template-provider/Cargo.toml` -- add `test-support` feature
 
 ---
 
@@ -61,8 +84,7 @@ A single comprehensive test that runs entirely in-process, no network required:
 2. **Template -> Job:** Feed mock template through `JobDistributor::update_template()`, create `NewEquihashJob` for the channel
 3. **Share submission:** Build `SubmitEquihashShare` with valid timestamp and nonce_2. Run through `ShareProcessor::validate_share_with_job()`. Verify the pipeline executes correctly (share is rejected for InvalidSolution since we can't produce real Equihash, but the pipeline doesn't panic or return unexpected errors)
 4. **Duplicate detection:** Same share again -> `Duplicate` rejection
-5. **Timestamp validation:** Shares at boundary values (job_time - 60, job_time + 7200 accepted; job_time - 61, job_time + 7201 rejected)
-6. **Payout tracking:** Record shares, verify `PayoutTracker` accumulates correctly
+5. **Payout tracking:** Record shares, verify `PayoutTracker` accumulates correctly
 7. **Vardiff cycle:** Record multiple shares, trigger `maybe_retarget()`, verify difficulty adjusts
 8. **New block:** Second template with different `prev_hash`, verify new block detection, `clean_jobs` invalidates old jobs
 
@@ -76,23 +98,23 @@ A single comprehensive test that runs entirely in-process, no network required:
 
 ### Problem
 
-The pool server's async code (PayoutTracker, DuplicateDetector, JobDistributor, Channel) uses `RwLock<HashMap>` and `Arc` sharing across tasks. No tests exercise these under contention.
+The pool server's async code (PayoutTracker, DuplicateDetector, JobDistributor, Channel) uses shared state across tasks. No tests exercise these under contention.
 
 ### Design
 
-All tests use `#[tokio::test(flavor = "multi_thread")]` and `tokio::sync::Barrier` to ensure tasks start simultaneously.
+All tests use `#[tokio::test(flavor = "multi_thread")]` and `tokio::sync::Barrier` to ensure tasks start simultaneously. Must use `multi_thread` flavor because `PayoutTracker` and `InMemoryDuplicateDetector` use `std::sync::RwLock` (not `tokio::sync::RwLock`), which blocks the runtime thread during lock acquisition and would deadlock with `current_thread`.
 
 **Test 1: PayoutTracker under contention.**
-50 tasks x 1000 shares each -> verify total_shares == 50,000 and total_difficulty is exact expected sum. Catches lock poisoning, lost updates, f64 drift.
+50 tasks x 1000 shares each, all using difficulty `1.0` (avoids f64 ordering issues). Verify total_shares == 50,000 and total_difficulty == 50,000.0. Catches lock poisoning and lost updates.
 
 **Test 2: DuplicateDetector concurrent submissions.**
 100 tasks submit the exact same (job_id, nonce_2, solution) simultaneously. Exactly 1 succeeds, 99 report duplicate. Catches TOCTOU in check-and-record.
 
 **Test 3: JobDistributor template update race.**
-1 task rapidly updates templates with incrementing heights. 20 tasks call `create_job()` concurrently. No panics, no jobs returned for superseded heights.
+Wrap `JobDistributor` in `Arc<tokio::sync::RwLock<JobDistributor>>` (since `update_template` takes `&mut self`). 1 task rapidly updates templates with incrementing heights. 20 tasks acquire read lock and call `create_job()` concurrently. No panics, no jobs returned for superseded heights.
 
 **Test 4: Channel cleanup during active reads.**
-1 task calls `add_job` with `clean_jobs=true` while another calls `is_job_active()`. No panics.
+Wrap `Channel` in `Arc<tokio::sync::RwLock<Channel>>` (since `add_job` takes `&mut self`). 1 task calls `add_job` with `clean_jobs=true` while another calls `is_job_active()`. No panics.
 
 ### Files
 
@@ -104,11 +126,11 @@ All tests use `#[tokio::test(flavor = "multi_thread")]` and `tokio::sync::Barrie
 
 ### Problem
 
-`forge.rs` has 200 lines and zero tests. All error paths in block relay construction are uncovered.
+`forge.rs` has 199 lines and zero tests. All error paths in block relay construction are uncovered.
 
 ### Design
 
-Extract `build_compact_block_from_template()` and `compute_header_hash()` as testable standalone functions (or methods on a lightweight struct without the `RelayClient`). This avoids needing UDP socket binding in unit tests.
+Extract `build_compact_block_from_template()` and `compute_header_hash()` as free functions (not methods on `ForgeRelay`) so they can be tested without constructing a `RelayClient` (which requires UDP socket binding). The `ForgeRelay` methods become thin wrappers that call these functions.
 
 **Test 1:** `new()` rejects empty peers -> `Err(PoolError::Config(...))`
 
@@ -128,17 +150,17 @@ Extract `build_compact_block_from_template()` and `compute_header_hash()` as tes
 
 ### Problem
 
-`handshake.rs` establishes every encrypted miner connection (163 lines, zero tests). Unhandled failures here mean miners silently can't connect.
+`handshake.rs` establishes every encrypted miner connection (162 lines). It has 1 existing test (`test_handshake_roundtrip`) covering the happy path. Error paths are uncovered -- unhandled failures here mean miners silently can't connect.
 
 ### Design
+
+Add 3 new error path tests to the existing test module (the happy-path test already exists):
 
 **Test 1:** Client initiates with wrong server public key -> handshake error (not hang/panic)
 
 **Test 2:** Server drops TCP mid-handshake -> client gets IO error
 
 **Test 3:** Client sends garbage bytes instead of Noise handshake -> server's `accept()` returns error
-
-**Test 4:** Successful handshake produces working `NoiseStream` (sanity check of the entry points)
 
 ### Files
 
@@ -194,7 +216,9 @@ All use `criterion`.
 - Create: `crates/zcash-pool-server/benches/payout_bench.rs`
 - Create: `crates/zcash-pool-common/benches/compact_size_bench.rs`
 - Create: `crates/bedrock-noise/benches/transport_bench.rs`
-- Modify: Cargo.toml files to add `criterion` dev-dependency and `[[bench]]` entries
+- Modify: `crates/zcash-pool-server/Cargo.toml` -- add `criterion` dev-dep, `[[bench]]` entries
+- Modify: `crates/zcash-pool-common/Cargo.toml` -- add `criterion` dev-dep, `[[bench]]` entry
+- Modify: `crates/bedrock-noise/Cargo.toml` -- add `criterion` dev-dep, `[[bench]]` entry
 
 ---
 
@@ -215,8 +239,8 @@ Port these 4 test cases to `bedrock-forge`:
 
 ### From rust-bitcoin BIP 152 (`p2p/src/bip152.rs`)
 
-5. **Short ID SipHash key derivation** -- Verify our `ShortId::compute()` produces the same result as `SHA256(header || nonce)` split into SipHash k0/k1. This is the BIP 152 interop test.
-6. **Real block test vector** -- Create a Zcash-specific test vector from a real mainnet block (serialize to compact block, verify byte-exact output).
+5. **Short ID SipHash key derivation** -- Verify our `ShortId::compute()` key derivation matches BIP 152. Our implementation takes a pre-computed `header_hash` (double-SHA256 of header) and derives k0 from `header_hash[0..8]` as LE u64 and k1 from `header_hash[8..16] XOR nonce`. Test with known inputs and verify against a reference SipHash-2-4 implementation.
+6. **Real block test vector** -- Create a Zcash-specific test vector from a real mainnet block. Extract a block at a known height from a running Zebra node via `getblock` RPC, serialize to compact block, and hardcode the expected output bytes. This provides a regression anchor.
 
 ### From SRI Stratum V2
 
@@ -225,7 +249,7 @@ Port these 4 test cases to `bedrock-forge`:
 
 ### From Noise Protocol Spec
 
-9. **Noise NK test vectors** -- Validate `bedrock-noise` handshake against cacophony's published test vectors for Noise_NK_25519_ChaChaPoly_BLAKE2s (or whichever variant we use). Verify byte-identical handshake messages for known keys/nonces.
+9. **Noise NK test vectors** -- Validate `bedrock-noise` handshake against cacophony's published test vectors for `Noise_NK_25519_ChaChaPoly_BLAKE2s` (confirmed as our variant in `bedrock-noise/src/lib.rs` line 29). Verify byte-identical handshake messages for known keys/nonces.
 
 ### Files
 
@@ -249,7 +273,8 @@ Port these 4 test cases to `bedrock-forge`:
 Sections have dependencies:
 
 ```
-Section 1 (Mock Zebra) ──> Section 2 (E2E test) ──> Section 4 (ForgeRelay, uses templates)
+Section 1 (Mock Zebra) ──> Section 2 (E2E test)
+                       ──> Section 4 (ForgeRelay, uses TestTemplateFactory)
                        ──> Section 8 (Upstream ports, some use mock)
 
 Section 3 (Concurrent stress) -- independent
@@ -260,4 +285,4 @@ Section 7 (Benchmarks)        -- independent, do last
 
 Recommended order: 1 -> 6 -> 5 -> 3 -> 2 -> 4 -> 8 -> 7
 
-Start with the mock (unlocks everything), then independent unit tests (6, 5, 3) in parallel, then integration (2, 4), then upstream ports (8), benchmarks last.
+Start with the mock (unlocks 2, 4, 8), then independent unit tests (6, 5, 3) which can be done in parallel, then integration tests (2, 4), then upstream ports (8), benchmarks last.

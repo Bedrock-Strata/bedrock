@@ -130,7 +130,12 @@ impl VardiffController {
 
     /// Set difficulty directly (for initial connection setup)
     pub fn set_difficulty(&mut self, difficulty: f64) {
-        self.current_difficulty = difficulty.clamp(
+        let safe = if difficulty.is_finite() && difficulty > 0.0 {
+            difficulty
+        } else {
+            self.config.min_difficulty
+        };
+        self.current_difficulty = safe.clamp(
             self.config.min_difficulty,
             self.config.max_difficulty,
         );

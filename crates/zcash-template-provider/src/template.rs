@@ -31,7 +31,7 @@ impl Default for TemplateProviderConfig {
 /// Template Provider that interfaces with Zebra and pushes templates to subscribers
 pub struct TemplateProvider {
     config: TemplateProviderConfig,
-    rpc: ZebraRpc,
+    rpc: Box<dyn RpcProvider>,
     template_id: AtomicU64,
     current_template: Arc<RwLock<Option<BlockTemplate>>>,
     sender: broadcast::Sender<BlockTemplate>,
@@ -45,11 +45,23 @@ impl TemplateProvider {
 
         Ok(Self {
             config,
-            rpc,
+            rpc: Box::new(rpc),
             template_id: AtomicU64::new(1),
             current_template: Arc::new(RwLock::new(None)),
             sender,
         })
+    }
+
+    /// Create with a custom RPC provider (for testing)
+    pub fn with_rpc(config: TemplateProviderConfig, rpc: Box<dyn RpcProvider>) -> Self {
+        let (sender, _) = broadcast::channel(16);
+        Self {
+            config,
+            rpc,
+            template_id: AtomicU64::new(1),
+            current_template: Arc::new(RwLock::new(None)),
+            sender,
+        }
     }
 
     /// Subscribe to template updates

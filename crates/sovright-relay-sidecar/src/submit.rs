@@ -43,6 +43,19 @@ pub trait SubmitBlock {
     }
 }
 
+/// Lets an `Arc<T>` stand in for the submitter anywhere a `&dyn SubmitBlock` is
+/// needed, so a shared RPC client can be wrapped (see `dual_submit`) without
+/// every handler taking ownership.
+impl<T: SubmitBlock + Send + Sync + ?Sized> SubmitBlock for std::sync::Arc<T> {
+    fn submit_block<'a>(&'a self, block_hex: &'a str) -> SubmitFuture<'a> {
+        (**self).submit_block(block_hex)
+    }
+
+    fn block_known<'a>(&'a self, block_hash_hex: &'a str) -> BlockKnownFuture<'a> {
+        (**self).block_known(block_hash_hex)
+    }
+}
+
 impl SubmitBlock for ZebraRpc {
     fn submit_block<'a>(&'a self, block_hex: &'a str) -> SubmitFuture<'a> {
         Box::pin(async move { ZebraRpc::submit_block(self, block_hex).await })

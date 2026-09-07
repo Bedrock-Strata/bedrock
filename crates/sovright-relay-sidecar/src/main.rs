@@ -26,6 +26,7 @@ use relay::RelayWrapper;
 use sovright_relay_sidecar::chain_view::{ZebraChainView, ZebraChainViewConfig};
 use sovright_relay_sidecar::compact::build_compact_block;
 use sovright_relay_sidecar::config;
+use sovright_relay_sidecar::dual_submit::{DualSubmit, build_submitter};
 use sovright_relay_sidecar::mempool_sync::run_zebra_mempool_sync;
 use sovright_relay_sidecar::rpc::ZebraRpc;
 use sovright_relay_sidecar::submit::{
@@ -314,6 +315,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let rpc = Arc::new(ZebraRpc::new(&zebra_url).await?);
     info!("Connected to Zebra RPC");
 
+    // A/B settings are config-file only: production runs with --config, and
+    // keeping them out of the big CLI/config tuple avoids churning three
+    // destructuring sites for a measurement feature.
+    let (zebra_url_secondary, submit_log_path) = match &args.config {
+        Some(path) => {
+            let cfg = config::Config::from_file(std::path::Path::new(path))?;
+            (cfg.zebra_url_secondary.clone(), cfg.submit_log_path.clone())
+        }
+        None => (None, None),
+    };
+
+    // Optional A/B second target. `submitter` wraps the RPC client; when no
+    // secondary is configured it is the primary plus (optional) logging and
+    // nothing else changes. Every submit path receives `submitter` rather than
+    // `rpc`, so the second target cannot be forgotten on one path -- the
+    // failure that left #88 inert on four of five call sites.
+    let secondary_submitter: Option<(Arc<dyn SubmitBlock + Send + Sync>, String)> =
+        match &zebra_url_secondary {
+            Some(url) => match ZebraRpc::new(url).await {
+                Ok(client) => {
+                    info!(secondary_url = %url, "A/B secondary submit target enabled");
+                    Some((
+                        Arc::new(client) as Arc<dyn SubmitBlock + Send + Sync>,
+                        url.clone(),
+                    ))
+                }
+                Err(error) => {
+                    // A secondary that will not connect must not stop the
+                    // sidecar: it is measurement, not production.
+                    warn!(%error, secondary_url = %url, "secondary submit target unavailable; continuing with primary only");
+                    None
+                }
+            },
+            None => None,
+        };
+    let submitter = Arc::new(build_submitter(
+        Arc::clone(&rpc),
+        &zebra_url,
+        secondary_submitter
+            .as_ref()
+            .map(|(node, url)| (Arc::clone(node), url.as_str())),
+        submit_log_path.as_deref().map(std::path::Path::new),
+    ));
+    if submitter.has_secondary() {
+        info!("submitblock will be mirrored to the secondary node");
+    }
+
     // Fold the local Zebra mempool into the reconstruction cache (opt-in). The
     // relay tx-feed only captures the ingress peers' relayed subset; Zebra sees
     // the full mempool, so this closes the compact-reconstruction coverage gap.
@@ -380,6 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         spawn_relay_block_handler(
             receiver,
             Arc::clone(&rpc),
+            Arc::clone(&submitter),
             mode,
             compact_reconstruction_enabled,
             raw_segment_buffer_config,
@@ -608,6 +657,9 @@ async fn submit_compact_fast_path<S, M>(
 fn spawn_relay_block_handler<M>(
     mut receiver: BlockReceiver,
     rpc: Arc<ZebraRpc>,
+    // The submitter every submit path uses. Distinct from `rpc`, which is still
+    // needed for chain-view height lookups that are not submissions.
+    submitter: Arc<DualSubmit<Arc<ZebraRpc>>>,
     mode: SubmitBlockMode,
     compact_reconstruction_enabled: bool,
     raw_segment_buffer_config: RawSegmentBufferConfig,
@@ -673,7 +725,7 @@ fn spawn_relay_block_handler<M>(
                                 let outcome = {
                                     let mut gate_guard = gate.lock().await;
                                     handle_relay_compact_block_with_gate(
-                                        rpc.as_ref(),
+                                        submitter.as_ref(),
                                         &compact,
                                         mode,
                                         &mut gate_guard,
@@ -702,7 +754,7 @@ fn spawn_relay_block_handler<M>(
                                 // compact block for the same block never both
                                 // submit (in either race order).
                                 submit_compact_fast_path(
-                                    rpc.as_ref(),
+                                    submitter.as_ref(),
                                     &compact,
                                     mode,
                                     compact_reconstruction_enabled,
@@ -722,7 +774,7 @@ fn spawn_relay_block_handler<M>(
                             // block is a no-op); on any unresolved short_id drop
                             // silently and wait for the full compact block.
                             submit_compact_fast_path(
-                                rpc.as_ref(),
+                                submitter.as_ref(),
                                 &compact,
                                 mode,
                                 compact_reconstruction_enabled,
@@ -801,7 +853,7 @@ fn spawn_relay_block_handler<M>(
                                                 };
                                                 let mut gate_guard = gate.lock().await;
                                                 handle_relay_raw_block_with_gate(
-                                                    rpc.as_ref(),
+                                                    submitter.as_ref(),
                                                     &raw_block,
                                                     Some(block_hash),
                                                     mode,
@@ -811,7 +863,7 @@ fn spawn_relay_block_handler<M>(
                                                 .await
                                             } else {
                                                 handle_relay_raw_block(
-                                                    rpc.as_ref(),
+                                                    submitter.as_ref(),
                                                     &raw_block,
                                                     Some(block_hash),
                                                     mode,

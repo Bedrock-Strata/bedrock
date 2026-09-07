@@ -3,6 +3,7 @@
 pub mod chain_view;
 pub mod compact;
 pub mod config;
+pub mod dual_submit;
 pub mod mempool_sync;
 pub mod rpc;
 pub mod submit;

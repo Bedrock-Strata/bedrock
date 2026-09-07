@@ -14,6 +14,21 @@ pub struct Config {
     #[serde(default = "default_zebra_url")]
     pub zebra_url: String,
 
+    /// Optional SECOND node to mirror every submitblock to, for A/B
+    /// comparison of two consensus implementations.
+    ///
+    /// Unset means today's behaviour exactly: one submit, one target. When set,
+    /// the same block is also submitted to this node, but the secondary result
+    /// never affects the primary -- see `dual_submit` for why it is spawned
+    /// rather than awaited.
+    #[serde(default)]
+    pub zebra_url_secondary: Option<String>,
+
+    /// Optional JSONL file recording one line per submitblock call, for both
+    /// targets. Joinable by `consensus_block_hash`.
+    #[serde(default)]
+    pub submit_log_path: Option<String>,
+
     /// Relay peer addresses
     pub relay_peers: Vec<String>,
 
@@ -456,6 +471,50 @@ mod tests {
         assert_eq!(
             config.tx_feed_bind_addr,
             Some("127.0.0.1:19091".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod ab_config_tests {
+    use super::*;
+
+    /// An existing config with no A/B keys must keep working untouched. This is
+    /// what every production sidecar has on disk today.
+    #[test]
+    fn absent_ab_keys_default_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        std::fs::write(
+            &path,
+            "zebra_url = \"http://127.0.0.1:8232\"\nrelay_peers = []\n",
+        )
+        .unwrap();
+        let cfg = Config::from_file(&path).unwrap();
+        assert!(cfg.zebra_url_secondary.is_none());
+        assert!(cfg.submit_log_path.is_none());
+    }
+
+    #[test]
+    fn ab_keys_are_read_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        std::fs::write(
+            &path,
+            "zebra_url = \"http://127.0.0.1:8232\"\n\
+             zebra_url_secondary = \"http://10.40.16.4:8232\"\n\
+             submit_log_path = \"/var/log/bedrock/submit-calls.jsonl\"\n\
+             relay_peers = []\n",
+        )
+        .unwrap();
+        let cfg = Config::from_file(&path).unwrap();
+        assert_eq!(
+            cfg.zebra_url_secondary.as_deref(),
+            Some("http://10.40.16.4:8232")
+        );
+        assert_eq!(
+            cfg.submit_log_path.as_deref(),
+            Some("/var/log/bedrock/submit-calls.jsonl")
         );
     }
 }

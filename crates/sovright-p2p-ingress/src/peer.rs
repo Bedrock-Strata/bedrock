@@ -207,15 +207,17 @@ pub async fn run_peer(
                     .get(..sovright_relay::ZCASH_FULL_HEADER_SIZE)
                     .map(sovright_relay::consensus_block_hash_display)
                     .unwrap_or_default();
-                // Best-effort: capture the coinbase miner payout script at
-                // hear-time. A None never blocks the forward below.
+                // Best-effort: capture the coinbase miner payout script and the
+                // pool tag at hear-time. A None never blocks the forward below.
                 let miner_script = crate::coinbase::coinbase_miner_script(&msg.payload);
+                let miner_tag = crate::coinbase::coinbase_text(&msg.payload);
                 events.p2p_block_received(
                     &peer,
                     &display,
                     &consensus_hash,
                     msg.payload.len(),
                     miner_script.as_deref(),
+                    miner_tag.as_deref(),
                 )?;
                 crawler.score_peer(
                     peer_addr,

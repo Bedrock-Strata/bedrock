@@ -262,6 +262,7 @@ impl EventSink {
         consensus_hash: &str,
         bytes: usize,
         miner_script: Option<&str>,
+        miner_tag: Option<&str>,
     ) -> Result<()> {
         let mut value = json!({
             "event": "p2p_block_received",
@@ -279,6 +280,13 @@ impl EventSink {
         // downstream against Zebra's getblock verbosity-2 scriptPubKey.hex.
         if let Some(miner_script) = miner_script {
             value["miner_script"] = json!(miner_script);
+        }
+        // Best-effort coinbase tag (printable ASCII, capped at parse time).
+        // Miner-CHOSEN text: the consumer maps it to a curated identifier and
+        // never renders it raw. Absent when the coinbase did not parse or
+        // carried nothing printable.
+        if let Some(miner_tag) = miner_tag {
+            value["miner_tag"] = json!(miner_tag);
         }
         self.write(value)
     }
@@ -422,5 +430,45 @@ mod tests {
         assert_eq!(rows[7]["bytes"], 321);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_miner_tag_on_block_received() {
+        let path = temp_log_path("block-received-tag");
+        let events = EventSink::new(Some(path.clone())).unwrap();
+
+        events
+            .p2p_block_received(
+                "127.0.0.1:8233",
+                "abcd",
+                "ef01",
+                1234,
+                Some("76a914aa"),
+                Some("/NiceHash/"),
+            )
+            .unwrap();
+        // Absent, not null: a missing key and a null mean the same thing to the
+        // consumer, and omitting keeps the hot-path log line smaller.
+        events
+            .p2p_block_received(
+                "127.0.0.1:8233",
+                "abcd",
+                "ef01",
+                1234,
+                Some("76a914aa"),
+                None,
+            )
+            .unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        fs::remove_file(&path).ok();
+
+        assert_eq!(lines[0]["miner_tag"], serde_json::json!("/NiceHash/"));
+        assert_eq!(lines[0]["miner_script"], serde_json::json!("76a914aa"));
+        assert!(lines[1].get("miner_tag").is_none());
     }
 }

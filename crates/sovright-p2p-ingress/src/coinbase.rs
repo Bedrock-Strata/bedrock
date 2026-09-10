@@ -284,7 +284,16 @@ mod tests {
 
     #[test]
     fn coinbase_text_is_truncated_to_the_cap() {
-        let script = vec![b'A'; 200];
+        // The leading 0x00 is deliberately OUTSIDE the BIP34-push guard's
+        // `1..=75` range, so this exercises the plain "long tag, no push"
+        // path rather than the skip branch. `b'A'` (0x41 = 65) would have
+        // fallen inside that range and been misread as a push-length byte --
+        // this test would still have passed (the run is homogeneous, so
+        // skipping a prefix of it changes nothing observable), but for the
+        // wrong reason, silently exercising BIP34-skip instead of the
+        // no-push path its name promises.
+        let mut script = vec![0x00];
+        script.extend(vec![b'A'; 200]);
         let block = block_from_coinbase(&v5_coinbase_with_script_sig(&script));
         assert_eq!(coinbase_text(&block).unwrap().len(), MAX_COINBASE_TEXT);
     }
@@ -293,6 +302,15 @@ mod tests {
     fn coinbase_text_is_always_valid_ascii_even_across_the_cap() {
         // The cap counts retained characters, and only ASCII is retained, so a
         // multi-byte sequence can never be split across the boundary.
+        //
+        // This script's first byte, b'A' (0x41 = 65), DOES fall inside the
+        // BIP34-push guard's `1..=75` range, but the guard also requires the
+        // script to be longer than the claimed push (65 bytes need a 66-byte
+        // script) -- and this script is exactly 65 bytes ((MAX_COINBASE_TEXT
+        // - 1) 'A's + the 2-byte UTF-8 encoding of 'e'-acute), so the guard
+        // is false and the skip correctly
+        // does not fire. That is by construction here, not luck: any change
+        // to MAX_COINBASE_TEXT that alters this length must re-check it.
         let mut script = vec![b'A'; MAX_COINBASE_TEXT - 1];
         script.extend_from_slice("é".as_bytes());
         let block = block_from_coinbase(&v5_coinbase_with_script_sig(&script));

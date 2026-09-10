@@ -10,7 +10,7 @@ equihash = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-blake2b_simd.workspace = true
+sha2.workspace = true
 
 # Local dependencies
 zcash-pool-common = { path = "../zcash-pool-common" }

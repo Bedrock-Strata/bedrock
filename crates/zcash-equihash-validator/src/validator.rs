@@ -112,25 +112,36 @@ impl EquihashValidator {
         Ok(hash)
     }
 
-    /// Compute the double SHA-256 hash of the block header + solution
-    /// (This is what gets compared against the target)
+    /// Compute Zcash's proof-of-work hash: the double-SHA256 of the full
+    /// 1487-byte serialized header, in internal byte order.
+    ///
+    /// This is the value the target must be compared against. It is the block
+    /// id Zebra reports and every explorer displays (as its byte reversal).
+    ///
+    /// It is deliberately NOT the BLAKE2b-256 digest personalised
+    /// `"ZcashBlockHash"`. Despite that personalization string, that digest is
+    /// the relay's INTERNAL object id, used for raw-segment dedup and
+    /// reassembly (see `sovright_relay::hash`, which documents the same
+    /// distinction). The two functions produce unrelated values over the same
+    /// bytes, so comparing that digest to an nBits-derived target accepts a
+    /// genuine block only by coincidence. Mainnet block 3470793, the fixture in
+    /// `tests/consensus_pow_hash.rs`, is one it rejects.
     fn compute_solution_hash(&self, header: &[u8], solution: &[u8]) -> Result<[u8; 32]> {
-        use blake2b_simd::Params;
+        use sha2::{Digest, Sha256};
 
-        // Zcash uses BLAKE2b for block hashing
-        // The block hash is BLAKE2b-256 of the full header including solution
+        // The serialized header is header(140) || compactSize(solution len) ||
+        // solution(1344), which is the same 1487 bytes the P2P network and
+        // `submitblock` carry.
         let mut data = Vec::with_capacity(header.len() + 3 + solution.len());
         data.extend_from_slice(header);
         zcash_pool_common::write_compact_size(solution.len() as u64, &mut data);
         data.extend_from_slice(solution);
 
-        let hash = Params::new()
-            .hash_length(32)
-            .personal(b"ZcashBlockHash\0\0")
-            .hash(&data);
+        let first = Sha256::digest(&data);
+        let second = Sha256::digest(first);
 
         let mut result = [0u8; 32];
-        result.copy_from_slice(hash.as_bytes());
+        result.copy_from_slice(&second);
         Ok(result)
     }
 

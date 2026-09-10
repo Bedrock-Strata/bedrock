@@ -4593,10 +4593,10 @@ dependencies = [
 name = "zcash-equihash-validator"
 version = "0.1.0"
 dependencies = [
- "blake2b_simd",
  "equihash 0.2.2",
  "hex",
  "proptest",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4725,13 +4725,13 @@ dependencies = [
 name = "zcash-test-miner"
 version = "0.1.0"
 dependencies = [
- "blake2b_simd",
  "clap",
  "equihash 0.2.2",
  "hex",
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sovright-noise",
  "tokio",
  "tracing",

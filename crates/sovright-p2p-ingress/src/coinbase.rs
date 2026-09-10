@@ -54,6 +54,75 @@ pub(crate) fn coinbase_miner_script(block_payload: &[u8]) -> Option<String> {
     Some(hex::encode(&miner_out.script_pubkey().0.0))
 }
 
+/// Maximum bytes of coinbase text retained. Pool tags are short; the cap bounds
+/// what miner-chosen input can cost downstream regardless of what a block claims.
+pub(crate) const MAX_COINBASE_TEXT: usize = 64;
+
+/// Parse the coinbase of a raw Zcash block payload and return the printable
+/// ASCII of its input script (the "coinbase tag"), truncated to
+/// `MAX_COINBASE_TEXT`.
+///
+/// Pools stamp an identifying string here ("2Miners https://2miners.com",
+/// "/NiceHash/"). It is the only signal that separates miners who take their
+/// reward SHIELDED, since those blocks carry no payout address of their own and
+/// all collapse onto the protocol funding-stream script.
+///
+/// SECURITY: this value is chosen by the miner and flows toward a public page.
+/// Non-printable bytes are dropped and the result is capped HERE, at the parse
+/// boundary, so nothing downstream has to trust the length or the contents. The
+/// consumer maps it to a curated identifier and never renders it raw.
+///
+/// Returns `None` on any failure and on a script with no printable bytes. Never
+/// panics: this is best-effort telemetry on the block-relay hot path.
+pub(crate) fn coinbase_text(block_payload: &[u8]) -> Option<String> {
+    let mut cursor = ZCASH_FULL_HEADER_SIZE;
+    let tx_count = decode_compact_size(block_payload, &mut cursor).ok()?;
+    if tx_count == 0 {
+        return None;
+    }
+    let coinbase_bytes = block_payload.get(cursor..)?;
+    let mut reader = Cursor::new(coinbase_bytes);
+    let tx = Transaction::read(&mut reader, SOVRIGHT_P2P_CONSENSUS_BRANCH_ID).ok()?;
+
+    let bundle = tx.transparent_bundle()?;
+    let input = bundle.vin.first()?;
+    // NB: the `script_sig` FIELD is #[deprecated] in zcash_transparent 0.9.0
+    // (bundle.rs:229); the accessor is not. Task 9 runs clippy with -D warnings,
+    // so the field form fails the build. The accessor returns `&Script`, whose
+    // own inner field is `zcash_script::script::Code`, itself `pub Vec<u8>` --
+    // hence `.0.0`, matching the `.script_pubkey().0.0` pattern already used
+    // above.
+    let script = &input.script_sig().0.0;
+
+    // Every valid coinbase scriptSig begins with a mandatory BIP34 push of the
+    // block height (push-opcode byte N, followed by N height bytes). Skip it
+    // before scanning for a pool tag: height bytes are essentially random and
+    // occasionally land in the printable ASCII range, which would otherwise
+    // leak a stray leading character into the tag. Anything that does not look
+    // like a well-formed push (short script, out-of-range length byte) is left
+    // as-is rather than rejected -- this is best-effort telemetry, not a
+    // consensus check.
+    let tag_bytes = match script.first() {
+        Some(&len) if (1..=75).contains(&len) && script.len() > len as usize => {
+            &script[1 + len as usize..]
+        }
+        _ => &script[..],
+    };
+
+    // Printable ASCII only. Filtering to ASCII also guarantees the result is
+    // valid UTF-8 no matter where the byte cap lands.
+    let text: String = tag_bytes
+        .iter()
+        .filter(|b| (0x20..0x7f).contains(*b))
+        .take(MAX_COINBASE_TEXT)
+        .map(|b| *b as char)
+        .collect();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +218,101 @@ mod tests {
         encode_compact_size(1, &mut block);
         block.extend_from_slice(coinbase);
         block
+    }
+
+    /// A minimal valid v5 coinbase whose single input carries `script_sig`.
+    /// Same shape as `v5_coinbase_two_outputs`, but the input script -- where a
+    /// pool stamps its tag -- is caller-supplied instead of fixed filler.
+    fn v5_coinbase_with_script_sig(script_sig: &[u8]) -> Vec<u8> {
+        let mut tx = Vec::new();
+        tx.extend_from_slice(&(OVERWINTERED_FLAG | 5).to_le_bytes());
+        tx.extend_from_slice(&TX_V5_VERSION_GROUP_ID.to_le_bytes());
+        tx.extend_from_slice(&NU5_CONSENSUS_BRANCH_ID.to_le_bytes());
+        tx.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        tx.extend_from_slice(&0u32.to_le_bytes()); // expiry_height
+
+        encode_compact_size(1, &mut tx); // one coinbase input
+        tx.extend_from_slice(&[0u8; 32]); // prevout hash
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // prevout index
+        encode_compact_size(script_sig.len() as u64, &mut tx);
+        tx.extend_from_slice(script_sig);
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // sequence
+
+        encode_compact_size(1, &mut tx); // one output
+        tx.extend_from_slice(&625_000_000u64.to_le_bytes());
+        let script = [0x76, 0xa9, 0x14, 0xde, 0xad, 0xbe, 0xef, 0x88, 0xac];
+        encode_compact_size(script.len() as u64, &mut tx);
+        tx.extend_from_slice(&script);
+
+        encode_compact_size(0, &mut tx); // sapling spends
+        encode_compact_size(0, &mut tx); // sapling outputs
+        encode_compact_size(0, &mut tx); // orchard actions
+        tx
+    }
+
+    #[test]
+    fn coinbase_text_is_none_for_a_real_v6_coinbase_with_no_printable_tag() {
+        // The same real mainnet block-3431157 fixture the miner-script test
+        // uses. Its scriptSig is `03 f5 5a 34 04 f0 9f a6 93`: a BIP34 push of
+        // the block height (f5 5a 34, little-endian for 3431157) followed by a
+        // 4-byte push (f0 9f a6 93) that is a single UTF-8 emoji codepoint --
+        // not ASCII. After skipping the mandatory height push, nothing in this
+        // particular block's extranonce is printable, so it legitimately
+        // carries no coinbase tag.
+        let cb = hex::decode(
+            REAL_MAINNET_V6_COINBASE_HEX
+                .chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .collect::<String>(),
+        )
+        .expect("fixture is hex");
+        let block = block_from_coinbase(&cb);
+        assert_eq!(coinbase_text(&block), None);
+    }
+
+    #[test]
+    fn coinbase_text_drops_non_printable_bytes() {
+        // The BIP34 height and nonce live in the same script as any pool tag,
+        // so a raw read is mostly control characters. Only printable ASCII
+        // survives, which is what leaves a readable tag.
+        let script = [
+            0x03, 0x8c, 0x11, 0x35, b'2', b'M', b'i', b'n', 0x00, 0x1b, b'e', b'r',
+        ];
+        let block = block_from_coinbase(&v5_coinbase_with_script_sig(&script));
+        assert_eq!(coinbase_text(&block).as_deref(), Some("2Miner"));
+    }
+
+    #[test]
+    fn coinbase_text_is_truncated_to_the_cap() {
+        let script = vec![b'A'; 200];
+        let block = block_from_coinbase(&v5_coinbase_with_script_sig(&script));
+        assert_eq!(coinbase_text(&block).unwrap().len(), MAX_COINBASE_TEXT);
+    }
+
+    #[test]
+    fn coinbase_text_is_always_valid_ascii_even_across_the_cap() {
+        // The cap counts retained characters, and only ASCII is retained, so a
+        // multi-byte sequence can never be split across the boundary.
+        let mut script = vec![b'A'; MAX_COINBASE_TEXT - 1];
+        script.extend_from_slice("é".as_bytes());
+        let block = block_from_coinbase(&v5_coinbase_with_script_sig(&script));
+        assert!(coinbase_text(&block).unwrap().is_ascii());
+    }
+
+    #[test]
+    fn coinbase_text_returns_none_on_garbage() {
+        // Same failure discipline as coinbase_miner_script: this runs on the
+        // block-relay hot path and must never fail or panic.
+        assert_eq!(coinbase_text(&[]), None);
+        assert_eq!(coinbase_text(&[0u8; 10]), None);
+        assert_eq!(coinbase_text(&vec![0u8; ZCASH_FULL_HEADER_SIZE]), None);
+    }
+
+    #[test]
+    fn coinbase_text_returns_none_when_nothing_printable_remains() {
+        let script = [0x03, 0x8c, 0x11, 0x35, 0x04, 0xf0, 0x9f, 0xa6];
+        let block = block_from_coinbase(&v5_coinbase_with_script_sig(&script));
+        assert_eq!(coinbase_text(&block), None);
     }
 
     #[test]

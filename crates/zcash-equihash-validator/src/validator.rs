@@ -102,7 +102,7 @@ impl EquihashValidator {
         self.verify_solution(header, solution)?;
 
         // Compute the hash of header + solution
-        let hash = self.compute_solution_hash(header, solution)?;
+        let hash = self.compute_solution_hash(header, solution);
 
         // Check if hash meets target (hash <= target, little-endian comparison)
         if !self.meets_target(&hash, target) {
@@ -115,34 +115,18 @@ impl EquihashValidator {
     /// Compute Zcash's proof-of-work hash: the double-SHA256 of the full
     /// 1487-byte serialized header, in internal byte order.
     ///
-    /// This is the value the target must be compared against. It is the block
-    /// id Zebra reports and every explorer displays (as its byte reversal).
+    /// This is the value the target must be compared against, and the block id
+    /// Zebra reports (explorers display its byte reversal). It is deliberately
+    /// NOT the BLAKE2b-256 digest personalised `"ZcashBlockHash"`, which is the
+    /// relay's internal object id over the same bytes; comparing that digest to
+    /// an nBits-derived target accepts a genuine block only by coincidence.
     ///
-    /// It is deliberately NOT the BLAKE2b-256 digest personalised
-    /// `"ZcashBlockHash"`. Despite that personalization string, that digest is
-    /// the relay's INTERNAL object id, used for raw-segment dedup and
-    /// reassembly (see `sovright_relay::hash`, which documents the same
-    /// distinction). The two functions produce unrelated values over the same
-    /// bytes, so comparing that digest to an nBits-derived target accepts a
-    /// genuine block only by coincidence. Mainnet block 3470793, the fixture in
-    /// `tests/consensus_pow_hash.rs`, is one it rejects.
-    fn compute_solution_hash(&self, header: &[u8], solution: &[u8]) -> Result<[u8; 32]> {
-        use sha2::{Digest, Sha256};
-
-        // The serialized header is header(140) || compactSize(solution len) ||
-        // solution(1344), which is the same 1487 bytes the P2P network and
-        // `submitblock` carry.
-        let mut data = Vec::with_capacity(header.len() + 3 + solution.len());
-        data.extend_from_slice(header);
-        zcash_pool_common::write_compact_size(solution.len() as u64, &mut data);
-        data.extend_from_slice(solution);
-
-        let first = Sha256::digest(&data);
-        let second = Sha256::digest(first);
-
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&second);
-        Ok(result)
+    /// The rule itself lives in `zcash_pool_common::block_hash`, which is the
+    /// single implementation shared with the test miner and the relay.
+    /// `tests/consensus_pow_hash.rs` pins the result against mainnet block
+    /// 3470793.
+    fn compute_solution_hash(&self, header: &[u8], solution: &[u8]) -> [u8; 32] {
+        zcash_pool_common::consensus_block_hash_parts(header, solution)
     }
 
     /// Check if a hash meets the target (hash <= target, little-endian)

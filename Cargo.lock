@@ -3314,6 +3314,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zcash-equihash-validator",
+ "zcash-pool-common",
  "zcash_primitives",
  "zcash_protocol",
 ]
@@ -3342,6 +3343,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zcash-equihash-validator",
+ "zcash-pool-common",
  "zcash_primitives",
  "zcash_protocol",
 ]
@@ -4596,7 +4598,6 @@ dependencies = [
  "equihash 0.2.2",
  "hex",
  "proptest",
- "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4731,12 +4732,12 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sovright-noise",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "zcash-mining-protocol",
+ "zcash-pool-common",
 ]
 
 [[package]]

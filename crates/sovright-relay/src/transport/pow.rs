@@ -59,7 +59,6 @@ enum TargetCheck {
 /// `zcash-equihash-validator/tests/consensus_pow_hash.rs`, so the two cannot
 /// drift apart unnoticed.
 fn header_meets_stated_target(header: &[u8]) -> TargetCheck {
-    use sha2::{Digest, Sha256};
     use zcash_equihash_validator::{Target, compact_to_target};
 
     // Zcash header: version(4) prev(32) merkle(32) commitments(32) time(4) bits(4) nonce(32),
@@ -81,10 +80,7 @@ fn header_meets_stated_target(header: &[u8]) -> TargetCheck {
         return TargetCheck::BadTarget;
     }
 
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&Sha256::digest(Sha256::digest(
-        &header[..ZCASH_FULL_HEADER_SIZE],
-    )));
+    let hash = crate::consensus_block_hash(&header[..ZCASH_FULL_HEADER_SIZE]);
     if target.is_met_by(&hash) {
         TargetCheck::Met
     } else {
@@ -126,14 +122,14 @@ impl PowValidator for RejectAllValidator {
 pub const EQUIHASH_N: u32 = 200;
 pub const EQUIHASH_K: u32 = 9;
 
-/// Zcash block header size (without Equihash solution)
-pub const ZCASH_HEADER_SIZE: usize = 140;
-
-/// Equihash solution size for n=200, k=9
-pub const EQUIHASH_SOLUTION_SIZE: usize = 1344;
-
-/// Full Zcash block header size (with Equihash solution)
-pub const ZCASH_FULL_HEADER_SIZE: usize = ZCASH_HEADER_SIZE + 3 + EQUIHASH_SOLUTION_SIZE; // 3 bytes for compactSize
+/// The serialized header layout, re-exported under the names this crate
+/// already publishes from its single definition in
+/// `zcash_pool_common::block_hash`. Redeclaring the layout per crate is how it
+/// came to exist in three independent copies.
+pub use zcash_pool_common::{
+    BASE_HEADER_BYTES as ZCASH_HEADER_SIZE, SOLUTION_BYTES as EQUIHASH_SOLUTION_SIZE,
+    ZCASH_FULL_HEADER_SIZE,
+};
 
 /// Validator using real Equihash proof-of-work verification
 ///

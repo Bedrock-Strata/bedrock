@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rand::Rng;
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -580,21 +579,12 @@ fn build_nonce(nonce_1: &[u8], nonce_2_len: usize, index: u64) -> [u8; 32] {
 /// It is NOT the BLAKE2b-256 digest personalised "ZcashBlockHash": that value
 /// is the relay's internal object id (see `sovright_relay::hash`), not Zcash's
 /// block hash.
+///
+/// The rule itself lives in `zcash_pool_common::block_hash`, the single
+/// implementation the validator and the relay also use, so the miner cannot
+/// select shares by a different hash than the pool checks them with.
 fn compute_block_hash(header: &[u8; 140], solution: &[u8]) -> [u8; 32] {
-    // Compact size encoding for 1344: 0xfd followed by 1344 as u16 LE
-    // 1344 = 0x0540
-    let compact_size: [u8; 3] = [0xfd, 0x40, 0x05];
-
-    let first = Sha256::new()
-        .chain_update(header)
-        .chain_update(compact_size)
-        .chain_update(solution)
-        .finalize();
-    let second = Sha256::digest(first);
-
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&second);
-    result
+    zcash_pool_common::consensus_block_hash_parts(header, solution)
 }
 
 /// Compare a hash against a target in little-endian 256-bit representation.

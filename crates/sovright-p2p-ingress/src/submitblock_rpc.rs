@@ -21,6 +21,7 @@ use sovright_relay_sidecar::rpc::ZebraRpc;
 use sovright_relay_sidecar::submit::SubmitBlock;
 use tracing::{info, warn};
 use zcash_equihash_validator::{EquihashValidator, Target, compact_to_target};
+use zcash_pool_common::{BASE_HEADER_BYTES, BITS_OFFSET, SOLUTION_BYTES, SOLUTION_PREFIX_BYTES};
 
 use crate::block::compact_block_from_raw_block;
 use crate::config::SubmitBlockRpcConfig;
@@ -28,15 +29,10 @@ use crate::error::{IngressError, Result};
 use crate::relay_bridge::{ForwardedBlock, RelayBridge};
 use crate::tx_cache::TxCache;
 
-// Zcash block-header byte layout (all little-endian, contiguous from offset 0):
-//   version(4) prev(32) merkle(32) finalsaplingroot(32) time(4) bits(4) nonce(32)
-// so `bits` starts at 4+32+32+32+4 = 104 (BITS_OFFSET) and the fixed header is
-// 140 bytes (BASE_HEADER_BYTES). It is followed by CompactSize(1344) == the
-// 3-byte prefix [0xfd,0x40,0x05] then the 1344-byte Equihash solution.
-const BITS_OFFSET: usize = 104;
-const BASE_HEADER_BYTES: usize = 140;
-const SOLUTION_PREFIX_BYTES: usize = 3;
-const SOLUTION_BYTES: usize = 1_344;
+// The Zcash block-header byte layout -- BITS_OFFSET, BASE_HEADER_BYTES,
+// SOLUTION_PREFIX_BYTES, SOLUTION_BYTES -- is imported above from
+// `zcash_pool_common::block_hash`, which defines it once and documents it.
+// This file used to declare its own copy of all four.
 const JSON_OVERHEAD_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: u32 = 16;
 

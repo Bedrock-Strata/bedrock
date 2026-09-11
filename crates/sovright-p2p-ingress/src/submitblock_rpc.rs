@@ -514,28 +514,11 @@ mod tests {
         );
     }
 
-    /// Mainnet block 3470793: the 1487-byte header on line 1, then its 7
-    /// transactions. Reused from the sovright-relay fixtures rather than
-    /// duplicated, so both crates judge the same real bytes.
-    const MAINNET_BLOCK_FIXTURE: &str =
-        include_str!("../../sovright-relay/tests/fixtures/mainnet_block_3470793.txt");
-
+    /// Mainnet block 3470793: the 1487-byte header, then its 7 transactions.
+    /// Assembled by the shared loader in `zcash-pool-common`, so every crate
+    /// judges the same real bytes parsed the same way.
     fn real_mainnet_block() -> Vec<u8> {
-        let mut lines = MAINNET_BLOCK_FIXTURE
-            .lines()
-            .filter(|line| !line.trim().is_empty());
-        let header = hex::decode(lines.next().expect("header line").trim()).expect("header hex");
-        assert_eq!(header.len(), ZCASH_FULL_HEADER_SIZE);
-        let txs: Vec<Vec<u8>> = lines
-            .map(|line| hex::decode(line.trim()).expect("tx hex"))
-            .collect();
-
-        let mut block = header;
-        crate::wire::encode_compact_size(txs.len() as u64, &mut block);
-        for tx in &txs {
-            block.extend_from_slice(tx);
-        }
-        block
+        zcash_pool_common::fixtures::mainnet_raw_block()
     }
 
     /// THE regression. Every prior test here only proved that GARBAGE is
@@ -578,7 +561,7 @@ mod tests {
         let consensus = sovright_relay::consensus_block_hash(header);
         assert_eq!(
             sovright_relay::consensus_block_hash_display(header),
-            "000000000030976123e65211bdfb288b21b4492f56bb1a42710588ca6b8c0d98",
+            zcash_pool_common::fixtures::MAINNET_BLOCK_3470793_HASH_DISPLAY,
             "fixture must be the block Zebra reports under this hash"
         );
         assert!(

@@ -5,6 +5,8 @@
 
 pub mod block_hash;
 pub mod compact_size;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 pub mod payout;
 
 pub use block_hash::{

@@ -3,11 +3,12 @@
 //! `verify_share` compares the hash it computes against the target it is
 //! given, and returns that hash. Three sites judge it against a block target
 //! rather than a pool-chosen share target: `zcash-jd-server`'s
-//! `handle_push_solution` passes a target from the header's `nBits` in
-//! directly, while `zcash-pool-server` (`is_block`, which gates
-//! `submit_block`) and `zcash-jd-client` (`meets_block_target`, which gates
-//! block assembly) compare the returned hash against their block target. For
-//! any of that to mean anything, the hash has to be the one Zcash consensus
+//! `handle_push_solution` builds the header from the job and takes its target
+//! from the **declared job's** bits (`server.rs:655`,
+//! `compact_to_target(job.bits)`), while `zcash-pool-server` (`is_block`, which
+//! gates `submit_block`) and `zcash-jd-client` (`meets_block_target`, which
+//! gates block assembly) compare the returned hash against their block target.
+//! For any of that to mean anything, the hash has to be the one Zcash consensus
 //! uses: the double-SHA256 of the full 1487-byte serialized header.
 //!
 //! The other target tests in this crate use all-`0xff` ("easy") and all-`0x00`
@@ -17,48 +18,10 @@
 //! and its known block hash.
 
 use zcash_equihash_validator::{EquihashValidator, ValidationError, compact_to_target};
-
-/// Mainnet block 3470793: the 1487-byte serialized header on line 1, then its
-/// transactions. Shared with `sovright-relay` and `sovright-p2p-ingress` rather
-/// than duplicated, so every crate judges the same real bytes.
-const MAINNET_BLOCK_FIXTURE: &str =
-    include_str!("../../sovright-relay/tests/fixtures/mainnet_block_3470793.txt");
-
-/// The block id Zebra and explorers report for block 3470793, in display
-/// (big-endian) order. `verify_share` works in internal order, its reversal.
-const CONSENSUS_HASH_DISPLAY: &str =
-    "000000000030976123e65211bdfb288b21b4492f56bb1a42710588ca6b8c0d98";
-
-/// `nBits` starts at offset 104: version(4) prev(32) merkle(32)
-/// commitments(32) time(4). Offset 100 is `time`; reading it there silently
-/// rejects every real header.
-const BITS_OFFSET: usize = 104;
-
-/// Header bytes before the solution, and the length of the solution itself.
-const BASE_HEADER_BYTES: usize = 140;
-const SOLUTION_PREFIX_BYTES: usize = 3;
-const SOLUTION_BYTES: usize = 1344;
-const ZCASH_FULL_HEADER_SIZE: usize = BASE_HEADER_BYTES + SOLUTION_PREFIX_BYTES + SOLUTION_BYTES;
-
-/// The 140-byte header and 1344-byte solution of mainnet block 3470793.
-fn mainnet_header_and_solution() -> (Vec<u8>, Vec<u8>) {
-    let line = MAINNET_BLOCK_FIXTURE
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .expect("fixture has a header line");
-    let full = hex::decode(line).expect("header hex");
-    assert_eq!(
-        full.len(),
-        ZCASH_FULL_HEADER_SIZE,
-        "fixture line 1 is the full serialized header"
-    );
-
-    let header = full[..BASE_HEADER_BYTES].to_vec();
-    let solution = full[BASE_HEADER_BYTES + SOLUTION_PREFIX_BYTES..].to_vec();
-    assert_eq!(solution.len(), SOLUTION_BYTES);
-    (header, solution)
-}
+use zcash_pool_common::block_hash::BITS_OFFSET;
+use zcash_pool_common::fixtures::{
+    MAINNET_BLOCK_3470793_HASH_DISPLAY, mainnet_header_and_solution,
+};
 
 /// The target this header itself states, via its `nBits`.
 fn stated_target(header: &[u8]) -> [u8; 32] {
@@ -70,9 +33,10 @@ fn stated_target(header: &[u8]) -> [u8; 32] {
     compact_to_target(bits).to_le_bytes()
 }
 
-/// The consensus hash of block 3470793 in internal byte order.
+/// The consensus hash of block 3470793 in internal byte order, the reversal of
+/// the display-order value the fixture publishes.
 fn consensus_hash_internal() -> [u8; 32] {
-    let mut hash: [u8; 32] = hex::decode(CONSENSUS_HASH_DISPLAY)
+    let mut hash: [u8; 32] = hex::decode(MAINNET_BLOCK_3470793_HASH_DISPLAY)
         .expect("hash hex")
         .try_into()
         .expect("32 bytes");
@@ -132,7 +96,7 @@ fn the_returned_hash_is_the_consensus_block_hash() {
     display.reverse();
     assert_eq!(
         hex::encode(display),
-        CONSENSUS_HASH_DISPLAY,
+        MAINNET_BLOCK_3470793_HASH_DISPLAY,
         "verify_share must return the consensus block hash for block 3470793"
     );
 }

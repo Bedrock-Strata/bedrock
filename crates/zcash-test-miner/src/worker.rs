@@ -779,27 +779,12 @@ mod tests {
         assert_eq!(val, 1344);
     }
 
-    /// Mainnet block 3470793, shared with the validator and relay tests so the
-    /// miner is pinned to the same real bytes as the pool.
-    const MAINNET_BLOCK_FIXTURE: &str =
-        include_str!("../../sovright-relay/tests/fixtures/mainnet_block_3470793.txt");
-
-    fn mainnet_header_and_solution() -> ([u8; 140], Vec<u8>) {
-        let line = MAINNET_BLOCK_FIXTURE
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .expect("fixture has a header line");
-        let full = hex::decode(line).expect("header hex");
-        assert_eq!(
-            full.len(),
-            1487,
-            "fixture line 1 is the full serialized header"
-        );
-        let mut header = [0u8; 140];
-        header.copy_from_slice(&full[..140]);
-        (header, full[143..].to_vec())
-    }
+    // Mainnet block 3470793 comes from the shared fixture in
+    // `zcash-pool-common`, so the miner is pinned to the same real bytes, by
+    // the same loader, as the validator and the relay.
+    use zcash_pool_common::fixtures::{
+        MAINNET_BLOCK_3470793_HASH_DISPLAY, mainnet_header_and_solution,
+    };
 
     #[test]
     fn compute_block_hash_is_the_consensus_block_hash() {
@@ -810,10 +795,7 @@ mod tests {
         let (header, solution) = mainnet_header_and_solution();
         let mut display = compute_block_hash(&header, &solution);
         display.reverse();
-        assert_eq!(
-            hex::encode(display),
-            "000000000030976123e65211bdfb288b21b4492f56bb1a42710588ca6b8c0d98"
-        );
+        assert_eq!(hex::encode(display), MAINNET_BLOCK_3470793_HASH_DISPLAY);
     }
 
     #[test]

@@ -30,4 +30,5 @@ toml = "0.8"
 jsonrpsee = { version = "0.24", features = ["http-client"] }
 
 [dev-dependencies]
+zcash-pool-common = { path = "../zcash-pool-common", features = ["test-support"] }
 tempfile = "3"

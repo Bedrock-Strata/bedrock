@@ -22,3 +22,6 @@ rand = "0.8"
 serde_json = { workspace = true }
 serde = { workspace = true }
 hex = { workspace = true }
+
+[dev-dependencies]
+zcash-pool-common = { path = "../zcash-pool-common", features = ["test-support"] }

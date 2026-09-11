@@ -128,16 +128,17 @@ impl SubmittedBlockValidator for MainnetSubmittedBlockValidator {
             .verify_solution(header, solution)
             .map_err(|error| format!("invalid mainnet proof of work: {error}"))?;
 
-        // Deliberately NOT `EquihashValidator::verify_share`, whose target arm
-        // hashes with BLAKE2b personalised "ZcashBlockHash". That value is the
-        // relay's INTERNAL object id (see sovright_relay::hash), not Zcash's
-        // block hash, so comparing it to an nBits-derived target rejected every
-        // genuine mainnet block -- proven by
-        // `production_validator_accepts_a_real_mainnet_block`.
+        // Deliberately NOT `EquihashValidator::verify_share`: that call bundles
+        // the Equihash check with the target check, and this path needs them
+        // apart. `verify_solution` above reports an invalid solution; the check
+        // below reports a target miss. They are different failures and get
+        // different messages.
         //
         // Zcash's PoW hash is the double-SHA256 of the full 1487-byte
-        // serialized header, compared as a little-endian 256-bit integer. The
-        // relay transport path already reaches the same conclusion in
+        // serialized header, compared as a little-endian 256-bit integer.
+        // `verify_share` computes that same hash -- pinned by
+        // `zcash-equihash-validator/tests/consensus_pow_hash.rs` -- and the
+        // relay transport path reaches it too, in
         // sovright_relay::transport::pow::header_meets_stated_target.
         let pow_hash = sovright_relay::consensus_block_hash(&block[..ZCASH_FULL_HEADER_SIZE]);
         if !target.is_met_by(&pow_hash) {
@@ -545,11 +546,12 @@ mod tests {
     /// rejected, so nothing established that a genuine solved block is
     /// ACCEPTED -- which is exactly how this survived.
     ///
-    /// The gateway validated PoW with `EquihashValidator::verify_share`, whose
-    /// target arm hashes with BLAKE2b personalised "ZcashBlockHash". That is
-    /// the relay's INTERNAL object id, not Zcash's block hash. Zcash's PoW hash
-    /// is the double-SHA256 of the full 1487-byte serialized header, so the
-    /// guard rejected every real block a pool could submit.
+    /// This gateway once validated PoW with `EquihashValidator::verify_share`,
+    /// which at the time hashed with BLAKE2b personalised "ZcashBlockHash" --
+    /// the relay's INTERNAL object id, not Zcash's block hash -- so the guard
+    /// rejected every real block a pool could submit. Both sides are fixed
+    /// now: this path uses `consensus_block_hash`, and `verify_share` computes
+    /// the same double-SHA256 of the full 1487-byte serialized header.
     #[test]
     fn production_validator_accepts_a_real_mainnet_block() {
         let validator = MainnetSubmittedBlockValidator::new(4 * 1024 * 1024);

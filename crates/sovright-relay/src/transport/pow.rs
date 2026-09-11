@@ -48,10 +48,16 @@ enum TargetCheck {
 /// Zcash's PoW hash is the **double-SHA256** of the full 1487-byte serialized
 /// header, compared as a little-endian 256-bit integer against the target.
 ///
-/// Note this deliberately does NOT use `EquihashValidator::verify_share`'s
-/// target arm. That helper hashes with BLAKE2b personalised `"ZcashBlockHash"`,
-/// which is not Zcash's block hash, and it rejects genuine mainnet headers --
-/// verified 2026-09-01 against the real header fixture below.
+/// This deliberately does not call `EquihashValidator::verify_share`, which
+/// bundles the Equihash check and the target check into a single call. The two
+/// are kept apart here: this is an anti-garbage guard on the transport path
+/// with its own `BadTarget` outcome, and callers verify the solution itself
+/// separately.
+///
+/// `verify_share` computes the same consensus hash as this function. That
+/// agreement is pinned by
+/// `zcash-equihash-validator/tests/consensus_pow_hash.rs`, so the two cannot
+/// drift apart unnoticed.
 fn header_meets_stated_target(header: &[u8]) -> TargetCheck {
     use sha2::{Digest, Sha256};
     use zcash_equihash_validator::{Target, compact_to_target};

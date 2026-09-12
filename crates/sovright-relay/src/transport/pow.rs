@@ -16,9 +16,12 @@
 //! Whether that target clears the current network difficulty is the full
 //! node's job, and needs chain context this layer does not have.
 
-/// Minimum block header size in bytes for validation
-/// The basic Zcash block header (without Equihash solution) is 140 bytes
-const MIN_HEADER_SIZE: usize = 140;
+/// Minimum block header size in bytes for validation.
+///
+/// The basic Zcash block header (without the Equihash solution) is 140 bytes.
+/// Derived from the shared layout rather than restated, so a layout change
+/// cannot update the shared constant and silently miss this one.
+const MIN_HEADER_SIZE: usize = zcash_pool_common::BASE_HEADER_BYTES;
 
 /// Number of bytes in the Equihash input before the 32-byte nonce.
 const ZCASH_EQUIHASH_INPUT_SIZE: usize = 108;
@@ -61,10 +64,10 @@ enum TargetCheck {
 fn header_meets_stated_target(header: &[u8]) -> TargetCheck {
     use zcash_equihash_validator::{Target, compact_to_target};
 
-    // Zcash header: version(4) prev(32) merkle(32) commitments(32) time(4) bits(4) nonce(32),
-    // so nBits starts at 4+32+32+32+4 = 104, little-endian. Offset 100 is `time`;
-    // reading it there silently rejects every real header.
-    const BITS_OFFSET: usize = 104;
+    // nBits is at offset 104, little-endian: version(4) prev(32) merkle(32)
+    // commitments(32) time(4). Offset 100 is `time`; reading it there silently
+    // rejects every real header. The offset comes from the shared layout.
+    use zcash_pool_common::BITS_OFFSET;
     let bits = u32::from_le_bytes([
         header[BITS_OFFSET],
         header[BITS_OFFSET + 1],
